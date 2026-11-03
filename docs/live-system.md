@@ -1,0 +1,124 @@
+# Running the live system on your K3s cluster
+
+The CSV scorer needs nothing but Python. The live SOC page needs a cluster,
+CICFlowMeter and a few one-time steps. This is for a single-node K3s lab like the
+one in the friend's project.
+
+## Architecture
+
+```
+ traffic lab (ids-traffic)            target apps (target-apps)
+   benign / port_scan / slow_dos  ──►  Node-RED · Grafana · InfluxDB
+   brute_force / web_attack / recon          │
+            │                                │
+            └──────────── cni0 bridge ───────┘
+                          │ tcpdump (adaptive 5/10/30 s windows)
+                          ▼
+     PCAP ─► CICFlowMeter ─► flow CSV ─► CIC-IDS2017 model ─► detections
+                                   └────► flow-burst detector
+                          ▼
+            SQLite knowledge base ◄──► MAPE-K controller ─► decoys (ids-deception)
+                          ▲                                      │ request logs
+                          └───────────── interactions ◄──────────┘
+            FastAPI backend ◄── live SOC dashboard (/live)
+```
+
+- **Detection lags traffic by about one window** (5–30 s) plus ~1 s of pipeline
+  time. This is window-based, not packet-by-packet real time.
+- Everything degrades gracefully: with no cluster the dashboard still shows stored
+  records and reports "Kubernetes unavailable".
+
+## Prerequisites
+
+- A single-node K3s cluster, with `~/.kube/config` readable (`export KUBECONFIG=$HOME/.kube/config`).
+- The three target apps in the `target-apps` namespace (Node-RED :1880, Grafana
+  :3000, InfluxDB :8086). Reuse an existing deployment or create your own.
+- A CICFlowMeter build that converts a PCAP directory to flow CSVs. The
+  [GintsEngelen fork](https://github.com/GintsEngelen/CICFlowMeter) (the one that
+  produced CIC-IDS2017) is recommended; set its paths in `config/live.yaml`
+  under `cicflowmeter`.
+- `tcpdump` with capture capability without sudo:
+  `sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump`
+  (undo with `sudo setcap -r /usr/bin/tcpdump`).
+
+## One-time setup
+
+```bash
+pip install -r requirements.txt          # includes kubernetes + pyyaml
+
+export KUBECONFIG=$HOME/.kube/config
+kubectl apply -f deploy/namespaces/
+kubectl apply -k deploy/traffic-lab           # benign generator, script ConfigMap, egress policy
+kubectl apply -k deploy/deception             # decoy server ConfigMap + decoy isolation policy
+kubectl apply -f deploy/rbac/ids-controller.yaml
+deploy/rbac/create-kubeconfig.sh              # writes config/ids-controller.kubeconfig
+```
+
+The controller/traffic-lab identity (`ids-controller`) can only manage decoys in
+`ids-deception` and Jobs in `ids-traffic`, and read the lab namespaces. It cannot
+touch `target-apps`, secrets or `kube-system`.
+
+## Run it
+
+```bash
+cd dashboard
+uvicorn app:app --host 127.0.0.1 --port 8000      # open http://localhost:8000/live
+```
+
+Then, on the **Live traffic** tab, press **Start capture**. On the **Traffic lab**
+tab, launch a scenario (e.g. *port scan* or *slow dos*) and watch the detections
+and flow bursts appear on **Overview**. On the **Deception** tab, press **Enable**
+and the controller deploys decoys for the confident detections and bursts.
+
+Capture and processing can also be driven from the command line:
+
+```bash
+python -m live.capture start                  # background windowed capture
+python -m live.process_pcap --pending         # convert + score any un-processed PCAPs
+python -m live.capture stop
+```
+
+## Traffic-lab scenarios
+
+Each is one bounded Job in `ids-traffic`, against the lab's own services, with
+egress locked to those services, the decoys and DNS. They exist to produce
+labelled traffic for measuring detection.
+
+| Scenario | What it sends | Expected class |
+|---|---|---|
+| benign | low-rate browsing / health checks | BENIGN |
+| web_recon | bounded HTTP path enumeration | BENIGN per flow; caught by the burst detector |
+| port_scan | TCP connect scan over a port range | PortScan |
+| slow_dos | many slow, partial HTTP connections | DoS |
+| brute_force | repeated login / SSH connect attempts | BruteForce |
+| web_attack | SQLi/XSS-style strings in query params | WebAttack |
+
+No payload is executed anywhere; brute_force and web_attack send signature-like
+strings to a test endpoint, never real credentials or exploits.
+
+## Decoys
+
+The controller maps a confident detection (or a flow burst's target port) to a
+decoy profile from `config/live.yaml`:
+
+| Evidence | Decoy profile |
+|---|---|
+| PortScan, burst to an unmapped port | web-portal, k8s-inventory |
+| BruteForce, burst to :22 | ssh-sentinel |
+| WebAttack | web-portal, nodered |
+| DoS / DDoS / Bot | web-portal |
+| burst to :1880 / :3000 / :8086 | nodered / grafana / influxdb |
+
+Decoys serve static synthetic pages, have no egress, are reachable only from the
+lab namespaces, and expire on a TTL that each interaction extends. No production
+traffic is ever redirected.
+
+## Tests
+
+```bash
+python -m pytest -q        # 15 tests; no cluster required
+```
+
+They cover the CSV schema quirks and feature aliasing, flow-burst detection, the
+SQLite store, the MAPE-K decisions (with a fake Kubernetes manager), and the
+bounded, locked-down traffic-lab Job spec.
