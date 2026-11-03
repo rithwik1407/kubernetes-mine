@@ -1,0 +1,112 @@
+# Configuration for the live pipeline, traffic lab and deception controller.
+# Relative paths resolve against the repo root. Override location with IDS_CONFIG.
+
+paths:
+  model_dir: models/cic-ids2017      # best_model.joblib + metrics.json live here
+  pipeline_dir: ml                   # prepare.py, for the CICFlowMeter column mapping
+  pcap_dir: captures/pcap
+  flows_dir: captures/flows
+  database: data/ids.sqlite
+
+detection:
+  # Refuse to predict when more than this fraction of model features is missing.
+  max_missing_feature_fraction: 0.2
+  # A flow is "malicious" when its predicted class is not this one.
+  benign_class: BENIGN
+
+# Per-source flow-burst detector (live/behavior.py). A single scan request looks
+# like a benign request; what gives a scan away is many flows from one source to
+# one service in a window. Lab measurement (friend's repo): recon pod 28-57
+# flows / 10 s window to a service; benign generator 0-3; kubelet 1.
+behavior:
+  min_flows: 15
+  min_rate_per_s: 1.0
+  protocols: [6]                     # TCP
+  ignore_sources: []
+
+capture:
+  interface: cni0                    # K3s pod bridge (Ethernet framing; see friend's notes)
+  tcpdump: /usr/bin/tcpdump
+  bpf_filter: ""
+  snaplen: 0
+  window:
+    default_seconds: 10
+    min_seconds: 5
+    max_seconds: 30
+    high_rate_pps: 200               # busier than this -> next window is min_seconds
+    low_rate_pps: 20                 # quieter than this -> next window is max_seconds
+  retain_pcaps: 500
+  state_file: captures/capture_state.json
+  pid_file: captures/capture.pid
+
+cicflowmeter:
+  # Path to a CICFlowMeter build that converts a PCAP directory to flow CSVs.
+  # The GintsEngelen fork (the one that produced CIC-IDS2017) is recommended.
+  home: ~/CICFlowMeter
+  jar: target/CICFlowMeterV3-0.0.4-SNAPSHOT.jar
+  jnetpcap_dir: jnetpcap/linux/jnetpcap-1.4.r1425
+  jnetpcap_maven_jar: ~/.m2/repository/org/jnetpcap/jnetpcap/1.4.1/jnetpcap-1.4.1.jar
+  java: java
+  timeout_seconds: 300
+
+# Traffic lab: each named scenario is one Kubernetes Job (deploy/traffic-lab).
+# "detectable" marks the attacks the CIC model was trained to recognise.
+traffic_lab:
+  namespace: ids-traffic
+  targets:
+    nodered:  {host: nodered.target-apps.svc.cluster.local,  port: 1880}
+    grafana:  {host: grafana.target-apps.svc.cluster.local,  port: 3000}
+    influxdb: {host: influxdb.target-apps.svc.cluster.local, port: 8086}
+  scenarios:
+    benign:      {mode: benign,       detectable: false, expect_class: BENIGN,     description: Low-rate browsing and health checks against the lab services}
+    web_recon:   {mode: web_recon,    detectable: false, expect_class: BENIGN,     description: Bounded HTTP path enumeration of Node-RED (caught by the burst detector, not the model)}
+    port_scan:   {mode: port_scan,    detectable: true,  expect_class: PortScan,   description: TCP connect scan across a port range on a lab target}
+    slow_dos:    {mode: slow_dos,     detectable: true,  expect_class: DoS,        description: Many slow partial HTTP connections held open against a target}
+    brute_force: {mode: brute_force,  detectable: true,  expect_class: BruteForce, description: Repeated login attempts against an SSH/HTTP test target}
+    web_attack:  {mode: web_attack,   detectable: true,  expect_class: WebAttack,  description: HTTP requests carrying SQLi / XSS-style payloads at a web target}
+
+deception:
+  namespace: ids-deception
+  kubeconfig: config/ids-controller.kubeconfig
+  template: deploy/deception/decoy-template.yaml
+  enabled_on_start: false
+  loop_interval_seconds: 5
+  max_active_decoys: 4
+  max_replicas: 3
+  decoy_ttl_seconds: 600
+  max_lifetime_seconds: 3600
+  cooldown_seconds: 15
+  redeploy_cooldown_seconds: 60
+  deploy_timeout_seconds: 120
+  act_on_sources: [pcap, live]
+  thresholds:
+    high_confidence: 0.9
+    medium_confidence: 0.6
+    repeat_count: 3
+    repeat_window_seconds: 300
+  engagement:
+    window_seconds: 300
+    scale_up_interactions: 20
+  scale_on_repeat: [web-portal]
+  profiles:
+    web-portal:    {port: 80,   description: Generic web portal for scans and web attacks}
+    ssh-sentinel:  {port: 2222, description: Fake SSH banner service for brute-force follow-up}
+    nodered:       {port: 1880, description: Simulated Node-RED flow editor}
+    grafana:       {port: 3000, description: Simulated metrics dashboard}
+    influxdb:      {port: 8086, description: Simulated time-series database}
+    k8s-inventory: {port: 8080, description: Simulated Kubernetes resource inventory}
+  # CIC model class -> decoy profiles (first preferred; reordered by past engagement).
+  attack_policy:
+    PortScan:   [web-portal, k8s-inventory]
+    DoS:        [web-portal]
+    DDoS:       [web-portal]
+    BruteForce: [ssh-sentinel, web-portal]
+    WebAttack:  [web-portal, nodered]
+    Bot:        [web-portal]
+  # Flow burst to a service port -> decoy profiles.
+  behavior_policy:
+    "1880": [nodered, web-portal]
+    "3000": [grafana]
+    "8086": [influxdb]
+    "22":   [ssh-sentinel]
+    default: [web-portal]

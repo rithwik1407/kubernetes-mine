@@ -10,3 +10,10 @@ venv/
 data/cic-ids2017/
 out/
 *.parquet
+
+# Live pipeline runtime
+captures/pcap/
+captures/flows/
+data/ids.sqlite*
+logs/
+config/*.kubeconfig
