@@ -1,0 +1,222 @@
+{
+  "features": [
+    "flowduration",
+    "totalfwdpackets",
+    "totalbackwardpackets",
+    "totallengthoffwdpackets",
+    "totallengthofbwdpackets",
+    "fwdpacketlengthmax",
+    "fwdpacketlengthmin",
+    "fwdpacketlengthmean",
+    "fwdpacketlengthstd",
+    "bwdpacketlengthmax",
+    "bwdpacketlengthmin",
+    "bwdpacketlengthmean",
+    "bwdpacketlengthstd",
+    "flowbytess",
+    "flowpacketss",
+    "flowiatmean",
+    "flowiatstd",
+    "flowiatmax",
+    "flowiatmin",
+    "fwdiattotal",
+    "fwdiatmean",
+    "fwdiatstd",
+    "fwdiatmax",
+    "fwdiatmin",
+    "bwdiattotal",
+    "bwdiatmean",
+    "bwdiatstd",
+    "bwdiatmax",
+    "bwdiatmin",
+    "fwdpshflags",
+    "fwdurgflags",
+    "fwdheaderlength",
+    "bwdheaderlength",
+    "fwdpacketss",
+    "bwdpacketss",
+    "minpacketlength",
+    "maxpacketlength",
+    "packetlengthmean",
+    "packetlengthstd",
+    "packetlengthvariance",
+    "finflagcount",
+    "synflagcount",
+    "rstflagcount",
+    "pshflagcount",
+    "ackflagcount",
+    "urgflagcount",
+    "cweflagcount",
+    "eceflagcount",
+    "downupratio",
+    "averagepacketsize",
+    "avgfwdsegmentsize",
+    "avgbwdsegmentsize",
+    "subflowfwdpackets",
+    "subflowfwdbytes",
+    "subflowbwdpackets",
+    "subflowbwdbytes",
+    "initwinbytesforward",
+    "initwinbytesbackward",
+    "actdatapktfwd",
+    "minsegsizeforward",
+    "activemean",
+    "activestd",
+    "activemax",
+    "activemin",
+    "idlemean",
+    "idlestd",
+    "idlemax",
+    "idlemin"
+  ],
+  "classes": [
+    "BENIGN",
+    "Bot",
+    "BruteForce",
+    "DDoS",
+    "DoS",
+    "PortScan",
+    "WebAttack"
+  ],
+  "split_counts": {
+    "train": {
+      "BENIGN": 400000,
+      "Bot": 978,
+      "BruteForce": 6405,
+      "DDoS": 89608,
+      "DoS": 135499,
+      "PortScan": 1295,
+      "WebAttack": 1500
+    },
+    "test": {
+      "BENIGN": 559354,
+      "Bot": 419,
+      "BruteForce": 2745,
+      "DDoS": 38403,
+      "DoS": 58071,
+      "PortScan": 555,
+      "WebAttack": 643
+    }
+  },
+  "models": {
+    "RandomForest": {
+      "accuracy": 0.9988200366561142,
+      "macro_f1": 0.9521776032282377,
+      "weighted_f1": 0.9988402007262461,
+      "attack_detection_rate": 0.9973323019556508,
+      "false_alarm_rate": 0.0008903127536408071,
+      "per_class": {
+        "BENIGN": {
+          "precision": 0.999518891124525,
+          "recall": 0.9991096872463592,
+          "f1": 0.9993142472947637,
+          "support": 559354
+        },
+        "Bot": {
+          "precision": 0.6524271844660194,
+          "recall": 0.801909307875895,
+          "f1": 0.7194860813704497,
+          "support": 419
+        },
+        "BruteForce": {
+          "precision": 0.9966996699669967,
+          "recall": 0.9901639344262295,
+          "f1": 0.993421052631579,
+          "support": 2745
+        },
+        "DDoS": {
+          "precision": 0.999609375,
+          "recall": 0.999531286618233,
+          "f1": 0.9995703292840123,
+          "support": 38403
+        },
+        "DoS": {
+          "precision": 0.9949698707273945,
+          "recall": 0.9980196655817878,
+          "f1": 0.9964924346629986,
+          "support": 58071
+        },
+        "PortScan": {
+          "precision": 0.9855595667870036,
+          "recall": 0.9837837837837838,
+          "f1": 0.9846708746618575,
+          "support": 555
+        },
+        "WebAttack": {
+          "precision": 0.9903225806451613,
+          "recall": 0.9548989113530326,
+          "f1": 0.9722882026920031,
+          "support": 643
+        }
+      },
+      "fit_seconds": 83.4,
+      "predict_seconds": 2.6,
+      "confusion_matrix": [
+        [
+          558856,
+          179,
+          9,
+          15,
+          289,
+          2,
+          4
+        ],
+        [
+          83,
+          336,
+          0,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          27,
+          0,
+          2718,
+          0,
+          0,
+          0,
+          0
+        ],
+        [
+          18,
+          0,
+          0,
+          38385,
+          0,
+          0,
+          0
+        ],
+        [
+          109,
+          0,
+          0,
+          0,
+          57956,
+          5,
+          1
+        ],
+        [
+          5,
+          0,
+          0,
+          0,
+          3,
+          546,
+          1
+        ],
+        [
+          27,
+          0,
+          0,
+          0,
+          1,
+          1,
+          614
+        ]
+      ]
+    }
+  },
+  "best_model": "RandomForest"
+}
