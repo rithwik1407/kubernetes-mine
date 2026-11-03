@@ -1,0 +1,67 @@
+setting,model,test,attack_windows,recall,precision,f1,attack_flow_coverage,fp_channels,benign_channels,fpr
+A: train dataset only,"rule(min_flows>=15,rate>=1,tcp)",benign_eval_a,0,,,,,0,91,0.0
+A: train dataset only,"rule(min_flows>=15,rate>=1,tcp)",benign_eval_b,0,,,,,0,709,0.0
+A: train dataset only,"rule(min_flows>=15,rate>=1,tcp)",recon_run1,7,1.0,1.0,1.0,1.0,0,354,0.0
+A: train dataset only,"rule(min_flows>=15,rate>=1,tcp)",recon_run2,4,1.0,1.0,1.0,1.0,0,280,0.0
+A: train dataset only,LogReg,benign_eval_a,0,,0.0,,,37,91,0.4065934065934066
+A: train dataset only,LogReg,benign_eval_b,0,,0.0,,,282,709,0.39774330042313116
+A: train dataset only,LogReg,recon_run1,7,0.0,0.0,0.0,0.0,139,354,0.3926553672316384
+A: train dataset only,LogReg,recon_run2,4,0.0,0.0,0.0,0.0,113,280,0.4035714285714286
+A: train dataset only,RandomForest,benign_eval_a,0,,,,,0,91,0.0
+A: train dataset only,RandomForest,benign_eval_b,0,,,,,0,709,0.0
+A: train dataset only,RandomForest,recon_run1,7,0.0,,0.0,0.0,0,354,0.0
+A: train dataset only,RandomForest,recon_run2,4,0.0,,0.0,0.0,0,280,0.0
+A: train dataset only,ExtraTrees,benign_eval_a,0,,,,,0,91,0.0
+A: train dataset only,ExtraTrees,benign_eval_b,0,,,,,0,709,0.0
+A: train dataset only,ExtraTrees,recon_run1,7,0.0,,0.0,0.0,0,354,0.0
+A: train dataset only,ExtraTrees,recon_run2,4,0.0,,0.0,0.0,0,280,0.0
+A: train dataset only,LightGBM,benign_eval_a,0,,,,,0,91,0.0
+A: train dataset only,LightGBM,benign_eval_b,0,,0.0,,,1,709,0.0014104372355430183
+A: train dataset only,LightGBM,recon_run1,7,0.0,,0.0,0.0,0,354,0.0
+A: train dataset only,LightGBM,recon_run2,4,0.0,0.0,0.0,0.0,1,280,0.0035714285714285713
+A: train dataset only,XGBoost,benign_eval_a,0,,,,,0,91,0.0
+A: train dataset only,XGBoost,benign_eval_b,0,,,,,0,709,0.0
+A: train dataset only,XGBoost,recon_run1,7,0.0,,0.0,0.0,0,354,0.0
+A: train dataset only,XGBoost,recon_run2,4,0.0,,0.0,0.0,0,280,0.0
+"B: dataset+lab(benign_train,recon_run1)","rule(min_flows>=15,rate>=1,tcp)",benign_eval_a,0,,,,,0,91,0.0
+"B: dataset+lab(benign_train,recon_run1)","rule(min_flows>=15,rate>=1,tcp)",benign_eval_b,0,,,,,0,709,0.0
+"B: dataset+lab(benign_train,recon_run1)","rule(min_flows>=15,rate>=1,tcp)",recon_run2,4,1.0,1.0,1.0,1.0,0,280,0.0
+"B: dataset+lab(benign_train,recon_run1)",LogReg,benign_eval_a,0,,0.0,,,2,91,0.02197802197802198
+"B: dataset+lab(benign_train,recon_run1)",LogReg,benign_eval_b,0,,0.0,,,7,709,0.009873060648801129
+"B: dataset+lab(benign_train,recon_run1)",LogReg,recon_run2,4,1.0,0.4,0.5714285714285714,1.0,6,280,0.02142857142857143
+"B: dataset+lab(benign_train,recon_run1)",RandomForest,benign_eval_a,0,,,,,0,91,0.0
+"B: dataset+lab(benign_train,recon_run1)",RandomForest,benign_eval_b,0,,,,,0,709,0.0
+"B: dataset+lab(benign_train,recon_run1)",RandomForest,recon_run2,4,0.75,1.0,0.8571428571428571,0.7623762376237624,0,280,0.0
+"B: dataset+lab(benign_train,recon_run1)",ExtraTrees,benign_eval_a,0,,,,,0,91,0.0
+"B: dataset+lab(benign_train,recon_run1)",ExtraTrees,benign_eval_b,0,,,,,0,709,0.0
+"B: dataset+lab(benign_train,recon_run1)",ExtraTrees,recon_run2,4,0.75,1.0,0.8571428571428571,0.7623762376237624,0,280,0.0
+"B: dataset+lab(benign_train,recon_run1)",LightGBM,benign_eval_a,0,,,,,0,91,0.0
+"B: dataset+lab(benign_train,recon_run1)",LightGBM,benign_eval_b,0,,,,,0,709,0.0
+"B: dataset+lab(benign_train,recon_run1)",LightGBM,recon_run2,4,1.0,1.0,1.0,1.0,0,280,0.0
+"B: dataset+lab(benign_train,recon_run1)",XGBoost,benign_eval_a,0,,,,,0,91,0.0
+"B: dataset+lab(benign_train,recon_run1)",XGBoost,benign_eval_b,0,,,,,0,709,0.0
+"B: dataset+lab(benign_train,recon_run1)",XGBoost,recon_run2,4,1.0,1.0,1.0,1.0,0,280,0.0
+"C: dataset+lab(benign_train,recon_run2)","rule(min_flows>=15,rate>=1,tcp)",benign_eval_a,0,,,,,0,91,0.0
+"C: dataset+lab(benign_train,recon_run2)","rule(min_flows>=15,rate>=1,tcp)",benign_eval_b,0,,,,,0,709,0.0
+"C: dataset+lab(benign_train,recon_run2)","rule(min_flows>=15,rate>=1,tcp)",recon_run1,7,1.0,1.0,1.0,1.0,0,354,0.0
+"C: dataset+lab(benign_train,recon_run2)",LogReg,benign_eval_a,0,,0.0,,,2,91,0.02197802197802198
+"C: dataset+lab(benign_train,recon_run2)",LogReg,benign_eval_b,0,,0.0,,,7,709,0.009873060648801129
+"C: dataset+lab(benign_train,recon_run2)",LogReg,recon_run1,7,1.0,0.7,0.8235294117647058,1.0,3,354,0.00847457627118644
+"C: dataset+lab(benign_train,recon_run2)",RandomForest,benign_eval_a,0,,,,,0,91,0.0
+"C: dataset+lab(benign_train,recon_run2)",RandomForest,benign_eval_b,0,,,,,0,709,0.0
+"C: dataset+lab(benign_train,recon_run2)",RandomForest,recon_run1,7,0.2857142857142857,1.0,0.4444444444444444,0.3234323432343234,0,354,0.0
+"C: dataset+lab(benign_train,recon_run2)",ExtraTrees,benign_eval_a,0,,,,,0,91,0.0
+"C: dataset+lab(benign_train,recon_run2)",ExtraTrees,benign_eval_b,0,,,,,0,709,0.0
+"C: dataset+lab(benign_train,recon_run2)",ExtraTrees,recon_run1,7,1.0,1.0,1.0,1.0,0,354,0.0
+"C: dataset+lab(benign_train,recon_run2)",LightGBM,benign_eval_a,0,,,,,0,91,0.0
+"C: dataset+lab(benign_train,recon_run2)",LightGBM,benign_eval_b,0,,,,,0,709,0.0
+"C: dataset+lab(benign_train,recon_run2)",LightGBM,recon_run1,7,0.7142857142857143,1.0,0.8333333333333334,0.8052805280528053,0,354,0.0
+"C: dataset+lab(benign_train,recon_run2)",XGBoost,benign_eval_a,0,,,,,0,91,0.0
+"C: dataset+lab(benign_train,recon_run2)",XGBoost,benign_eval_b,0,,,,,0,709,0.0
+"C: dataset+lab(benign_train,recon_run2)",XGBoost,recon_run1,7,0.8571428571428571,1.0,0.9230769230769231,0.8976897689768977,0,354,0.0
+D: train lab only -> test dataset,"rule(min_flows>=15,rate>=1,tcp)",kds:all,17,0.7058823529411765,0.02154398563734291,0.041811846689895474,0.9922937443336355,545,13518,0.040316614883858556
+D: train lab only -> test dataset,LogReg,kds:all,17,0.7647058823529411,0.019696969696969695,0.03840472673559823,0.9977334542157752,647,13518,0.047862109779553186
+D: train lab only -> test dataset,RandomForest,kds:all,17,0.7058823529411765,0.03278688524590164,0.06266318537859007,0.9922937443336355,354,13518,0.026187305814469597
+D: train lab only -> test dataset,ExtraTrees,kds:all,17,0.7058823529411765,0.03333333333333333,0.0636604774535809,0.9922937443336355,348,13518,0.02574345317354638
+D: train lab only -> test dataset,LightGBM,kds:all,17,0.7058823529411765,0.029556650246305417,0.05673758865248227,0.9922937443336355,394,13518,0.029146323420624353
+D: train lab only -> test dataset,XGBoost,kds:all,17,0.47058823529411764,0.006051437216338881,0.01194921583271098,0.9043517679057117,1314,13518,0.09720372836218376

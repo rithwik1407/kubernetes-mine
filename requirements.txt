@@ -1,0 +1,13 @@
+# Versions used to train models/cic-ids2017/best_model.joblib (Python 3.13).
+# Keep scikit-learn on the same minor version, or the saved model may not load.
+pandas==3.0.5
+numpy==2.5.3
+pyarrow
+scikit-learn==1.9.1
+lightgbm==4.7.0
+xgboost==3.4.1
+matplotlib
+joblib
+fastapi
+uvicorn
+python-multipart

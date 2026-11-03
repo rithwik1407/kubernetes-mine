@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.idea/
+.DS_Store
+
+# Big datasets and pipeline outputs stay out of git (see data/README.md)
+data/cic-ids2017/
+out/
+*.parquet

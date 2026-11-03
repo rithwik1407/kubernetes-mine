@@ -1,0 +1,470 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K3s IDS Dashboard</title>
+<script src="/static/plotly.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f4f4f2; --surface: #fcfcfb; --surface-2: #f0efec; --border: #e2e1dc;
+  --text: #0b0b0b; --text-2: #52514e; --muted: #8a8984; --grid: #e7e6e1;
+  --accent: #2a78d6; --critical: #d03b3b; --good: #0ca30c; --warning: #b77f00;
+  --c-benign: #a9a8a2;
+  --c-dos: #2a78d6; --c-ddos: #eb6834; --c-portscan: #1baf7a; --c-bruteforce: #eda100;
+  --c-webattack: #e87ba4; --c-bot: #008300;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    color-scheme: dark;
+    --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c;
+    --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86; --grid: #2c2c2a;
+    --accent: #3987e5; --warning: #fab219; --c-benign: #5f5e59;
+    --c-dos: #3987e5; --c-ddos: #d95926; --c-portscan: #199e70; --c-bruteforce: #c98500;
+    --c-webattack: #d55181; --c-bot: #008300;
+  }
+}
+:root[data-theme="dark"] {
+  color-scheme: dark;
+  --bg: #121211; --surface: #1a1a19; --surface-2: #232321; --border: #2f2f2c;
+  --text: #f0efec; --text-2: #c3c2b7; --muted: #8f8e86; --grid: #2c2c2a;
+  --accent: #3987e5; --warning: #fab219; --c-benign: #5f5e59;
+  --c-dos: #3987e5; --c-ddos: #d95926; --c-portscan: #199e70; --c-bruteforce: #c98500;
+  --c-webattack: #d55181; --c-bot: #008300;
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+header { display: flex; align-items: center; gap: 16px; padding: 14px 24px;
+  background: var(--surface); border-bottom: 1px solid var(--border); flex-wrap: wrap; }
+header h1 { font-size: 17px; margin: 0; font-weight: 650; }
+header .sub { color: var(--text-2); font-size: 13px; }
+nav { display: flex; gap: 4px; margin-left: auto; }
+nav button, .btn { border: 1px solid var(--border); background: var(--surface); color: var(--text);
+  padding: 7px 14px; border-radius: 8px; cursor: pointer; font: inherit; }
+nav button.on { background: var(--text); color: var(--surface); border-color: var(--text); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+main { padding: 20px 24px 48px; max-width: 1440px; margin: 0 auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
+.card h2 { font-size: 14px; margin: 0 0 2px; font-weight: 650; }
+.card .hint { color: var(--text-2); font-size: 12.5px; margin: 0 0 8px; }
+.grid { display: grid; gap: 16px; }
+.g-kpi { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.g-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+@media (max-width: 520px) { .g-2 { grid-template-columns: 1fr; } main { padding: 16px; } }
+.kpi .label { color: var(--text-2); font-size: 12.5px; }
+.kpi .value { font-size: 28px; font-weight: 650; font-variant-numeric: tabular-nums; margin-top: 2px; }
+.kpi .note { color: var(--muted); font-size: 12px; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 2px 8px; border-radius: 999px;
+  font-size: 12px; border: 1px solid var(--border); background: var(--surface-2); white-space: nowrap; }
+.dot { width: 9px; height: 9px; border-radius: 3px; display: inline-block; flex: none; }
+#drop { border: 2px dashed var(--border); border-radius: 12px; padding: 28px; text-align: center;
+  background: var(--surface); transition: border-color .15s, background .15s; }
+#drop.over { border-color: var(--accent); background: var(--surface-2); }
+#drop p { margin: 6px 0; color: var(--text-2); }
+.row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.status { margin-top: 10px; color: var(--text-2); font-size: 13px; min-height: 20px; }
+.alert { border-left: 4px solid var(--critical); }
+.alert.ok { border-left-color: var(--good); }
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
+.filters select, .filters input[type=search] { padding: 6px 10px; border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text); font: inherit; }
+.tablewrap { max-height: 460px; overflow: auto; border: 1px solid var(--border); border-radius: 8px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 13px; }
+th, td { padding: 7px 10px; text-align: left; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface-2); font-weight: 600; cursor: pointer; user-select: none; z-index: 1; }
+tbody tr { cursor: pointer; }
+tbody tr:hover { background: var(--surface-2); }
+tbody tr.sel { outline: 2px solid var(--accent); outline-offset: -2px; }
+.confbar { display: inline-block; width: 60px; height: 6px; background: var(--grid); border-radius: 3px; vertical-align: middle; margin-right: 6px; }
+.confbar > i { display: block; height: 100%; border-radius: 3px; background: var(--text-2); }
+.chart { width: 100%; height: 300px; }
+.hidden { display: none !important; }
+.muted { color: var(--muted); }
+code { background: var(--surface-2); padding: 1px 5px; border-radius: 4px; font-size: 12.5px; }
+.mt { margin-top: 16px; }
+.empty { color: var(--muted); text-align: center; padding: 40px 0; }
+</style>
+</head>
+<body>
+<header>
+  <div>
+    <h1>K3s Intrusion Detection</h1>
+    <div class="sub" id="modelLine">Loading model…</div>
+  </div>
+  <nav>
+    <button id="tabAnalyze" class="on">Analyze traffic</button>
+    <button id="tabModel">Model performance</button>
+    <button id="themeBtn" title="Toggle light/dark">Theme</button>
+  </nav>
+</header>
+
+<main>
+<!-- ============ ANALYZE ============ -->
+<section id="viewAnalyze">
+  <div id="drop">
+    <strong>Drop a CICFlowMeter CSV here</strong>
+    <p>Flows from your K3s cluster (e.g. <code>k8s-lab-01.pcap_ISCX.csv</code>). Nothing leaves this machine.</p>
+    <div class="row" style="justify-content:center">
+      <label class="btn primary">Choose CSV<input id="file" type="file" accept=".csv" hidden></label>
+      <button class="btn" id="demoBtn">Try a demo with attacks</button>
+    </div>
+    <div class="status" id="status"></div>
+  </div>
+
+  <div id="results" class="hidden">
+    <div class="card mt alert" id="verdict"></div>
+
+    <div class="grid g-kpi mt">
+      <div class="card kpi"><div class="label">Flows scored</div><div class="value" id="kFlows"></div><div class="note" id="kSrc"></div></div>
+      <div class="card kpi"><div class="label">Flagged as attack</div><div class="value" id="kAtt"></div><div class="note" id="kAttPct"></div></div>
+      <div class="card kpi"><div class="label">Mean confidence</div><div class="value" id="kConf"></div><div class="note" id="kLow"></div></div>
+      <div class="card kpi"><div class="label" id="kFeatLabel">Features matched</div><div class="value" id="kFeat"></div><div class="note" id="kFeatNote"></div></div>
+      <div class="card kpi hidden" id="kTruthCard"><div class="label">Agreement with CSV labels</div><div class="value" id="kTruth"></div><div class="note">CSV carries real CIC labels</div></div>
+    </div>
+
+    <div class="grid g-2 mt">
+      <div class="card">
+        <h2>Flows by predicted class</h2>
+        <p class="hint">Click a bar to filter the flow table. <label><input type="checkbox" id="hideBenign"> hide BENIGN</label></p>
+        <div id="chClass" class="chart"></div>
+      </div>
+      <div class="card">
+        <h2>Model confidence</h2>
+        <p class="hint">Share of flows by top-class probability. Flows under 60% deserve a manual look.</p>
+        <div id="chConf" class="chart"></div>
+      </div>
+    </div>
+
+    <div class="card mt" id="tlCard">
+      <h2>Flows over time</h2>
+      <p class="hint" id="tlHint"></p>
+      <div id="chTime" class="chart"></div>
+    </div>
+
+    <div class="grid g-2 mt">
+      <div class="card" id="destCard">
+        <h2>Top destinations</h2>
+        <p class="hint">Destination IP and port with the most flows, split by predicted class.</p>
+        <div id="chDest" class="chart" style="height:340px"></div>
+      </div>
+      <div class="card">
+        <h2>Selected flow</h2>
+        <p class="hint" id="flowHint">Click a row in the table below to see every class probability.</p>
+        <div id="chFlow" class="chart" style="height:340px"></div>
+      </div>
+    </div>
+
+    <div class="card mt">
+      <h2>Flows</h2>
+      <div class="filters">
+        <select id="fClass"><option value="">All classes</option></select>
+        <input type="search" id="fSearch" placeholder="Search IP or port">
+        <label class="muted">Confidence below <input type="range" id="fConf" min="0.3" max="1" step="0.05" value="1"> <span id="fConfV">100%</span></label>
+        <span class="muted" id="fCount"></span>
+        <button class="btn" id="dlBtn" style="margin-left:auto">Download predictions CSV</button>
+      </div>
+      <div class="tablewrap"><table id="tbl"><thead></thead><tbody></tbody></table></div>
+      <p class="hint" id="tblNote"></p>
+    </div>
+  </div>
+</section>
+
+<!-- ============ MODEL ============ -->
+<section id="viewModel" class="hidden">
+  <div class="card">
+    <h2>Model comparison on the held-out CIC-IDS2017 test split</h2>
+    <p class="hint">Macro F1 weighs every class equally, so it is the honest score here. Accuracy is ~99.9% for any decent model because most traffic is BENIGN.</p>
+    <div class="tablewrap" style="max-height:none"><table id="cmpTbl"><thead></thead><tbody></tbody></table></div>
+  </div>
+  <div class="grid g-2 mt">
+    <div class="card">
+      <h2>F1 per class and model</h2>
+      <p class="hint">Darker is better. Bot is the weak class for every model.</p>
+      <div id="chF1" class="chart" style="height:360px"></div>
+    </div>
+    <div class="card">
+      <div class="row" style="justify-content:space-between">
+        <div><h2>Confusion matrix</h2><p class="hint">Rows are true class, normalised to 100%. Off-diagonal cells are mistakes.</p></div>
+        <select id="cmModel" class="btn"></select>
+      </div>
+      <div id="chCM" class="chart" style="height:360px"></div>
+    </div>
+  </div>
+</section>
+</main>
+
+<script>
+const $ = s => document.querySelector(s);
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const CLASS_VAR = {BENIGN:'--c-benign', DoS:'--c-dos', DDoS:'--c-ddos', PortScan:'--c-portscan',
+  BruteForce:'--c-bruteforce', WebAttack:'--c-webattack', Bot:'--c-bot'};
+const ORDER = ['BENIGN','DoS','DDoS','PortScan','BruteForce','WebAttack','Bot'];
+const colorOf = c => css(CLASS_VAR[c] || '--muted');
+const fmt = n => n.toLocaleString();
+const pct = (x, d=1) => (x*100).toFixed(d) + '%';
+let DATA = null, METRICS = null, selected = null, sortKey = 'i', sortDir = 1;
+
+/* ---------- theme ---------- */
+$('#themeBtn').onclick = () => {
+  const dark = document.documentElement.dataset.theme
+    ? document.documentElement.dataset.theme === 'dark'
+    : matchMedia('(prefers-color-scheme: dark)').matches;
+  document.documentElement.dataset.theme = dark ? 'light' : 'dark';
+  try { localStorage.setItem('ids-theme', document.documentElement.dataset.theme); } catch (e) {}
+  rerender();
+};
+try { const t = localStorage.getItem('ids-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => rerender());
+
+function baseLayout(extra = {}) {
+  return Object.assign({
+    paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+    font: {family: 'system-ui, -apple-system, Segoe UI, Roboto, sans-serif', size: 12, color: css('--text-2')},
+    margin: {l: 48, r: 12, t: 8, b: 36},
+    xaxis: {gridcolor: css('--grid'), zeroline: false, linecolor: css('--border')},
+    yaxis: {gridcolor: css('--grid'), zeroline: false, linecolor: css('--border')},
+    hoverlabel: {bgcolor: css('--surface'), bordercolor: css('--border'), font: {color: css('--text')}},
+    showlegend: false, bargap: 0.25,
+  }, extra);
+}
+const CFG = {displayModeBar: false, responsive: true};
+
+/* ---------- tabs ---------- */
+function show(view) {
+  $('#viewAnalyze').classList.toggle('hidden', view !== 'a');
+  $('#viewModel').classList.toggle('hidden', view !== 'm');
+  $('#tabAnalyze').classList.toggle('on', view === 'a');
+  $('#tabModel').classList.toggle('on', view === 'm');
+  if (view === 'm') { renderModel(); requestAnimationFrame(rerenderModelSize); } else if (DATA) renderAll();
+}
+$('#tabAnalyze').onclick = () => show('a');
+$('#tabModel').onclick = () => show('m');
+
+/* ---------- upload ---------- */
+const drop = $('#drop');
+['dragenter','dragover'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.add('over'); }));
+['dragleave','drop'].forEach(e => drop.addEventListener(e, ev => { ev.preventDefault(); drop.classList.remove('over'); }));
+drop.addEventListener('drop', ev => { const f = ev.dataTransfer.files[0]; if (f) upload(f); });
+$('#file').onchange = ev => { const f = ev.target.files[0]; if (f) upload(f); };
+$('#demoBtn').onclick = async () => {
+  setStatus('Scoring demo flows…');
+  try { load(await (await check(fetch('/api/demo'))).json()); } catch (e) { setStatus(e.message, true); }
+};
+async function check(p) {
+  const r = await p;
+  if (!r.ok) { let m = r.statusText; try { m = (await r.json()).detail || m; } catch (e) {} throw new Error(m); }
+  return r;
+}
+async function upload(f) {
+  setStatus(`Uploading and scoring ${f.name} (${(f.size/1e6).toFixed(1)} MB)…`);
+  const fd = new FormData(); fd.append('file', f);
+  try { load(await (await check(fetch('/api/score', {method: 'POST', body: fd}))).json()); }
+  catch (e) { setStatus('Could not score this file: ' + e.message, true); }
+}
+function setStatus(t, err) { const s = $('#status'); s.textContent = t; s.style.color = err ? css('--critical') : ''; }
+
+function load(d) {
+  DATA = d; selected = null;
+  setStatus(`Scored ${fmt(d.n_flows)} flows from ${d.source} in ${d.seconds}s.`);
+  const sel = $('#fClass');
+  sel.innerHTML = '<option value="">All classes</option>' + d.classes.map(c => `<option>${c}</option>`).join('');
+  $('#results').classList.remove('hidden');
+  renderAll();
+}
+
+/* ---------- analyze view ---------- */
+function renderAll() {
+  if (!DATA) return;
+  const d = DATA;
+  const attPct = d.n_attacks / d.n_flows;
+  $('#kFlows').textContent = fmt(d.n_flows);
+  $('#kSrc').textContent = d.source;
+  $('#kAtt').textContent = fmt(d.n_attacks);
+  $('#kAttPct').textContent = pct(attPct) + ' of flows';
+  $('#kConf').textContent = pct(d.mean_conf, 0);
+  $('#kLow').textContent = `${fmt(d.low_conf)} flows under 60%`;
+  const fc = d.feature_check;
+  $('#kFeat').textContent = `${fc.used}/${fc.total}`;
+  $('#kFeatNote').textContent = fc.missing_filled_with_zero.length
+    ? 'Missing (set to 0): ' + fc.missing_filled_with_zero.join(', ')
+    : (fc.rows_with_nan_or_inf ? `${fmt(fc.rows_with_nan_or_inf)} rows had NaN/inf (set to 0)` : 'All model features present');
+  $('#kTruthCard').classList.toggle('hidden', d.truth_accuracy == null);
+  if (d.truth_accuracy != null) $('#kTruth').textContent = pct(d.truth_accuracy, 2);
+
+  const v = $('#verdict');
+  const attackClasses = ORDER.filter(c => c !== 'BENIGN' && d.counts[c] > 0);
+  v.classList.toggle('ok', d.n_attacks === 0);
+  v.innerHTML = d.n_attacks === 0
+    ? `<h2>✓ No attacks detected</h2><p class="hint" style="margin:0">All ${fmt(d.n_flows)} flows look like normal traffic to the model.</p>`
+    : `<h2>⚠ ${fmt(d.n_attacks)} suspicious flows</h2><div class="row" style="margin-top:6px">` +
+      attackClasses.map(c => `<span class="badge"><span class="dot" style="background:${colorOf(c)}"></span>${c} · ${fmt(d.counts[c])}</span>`).join('') + '</div>';
+
+  renderClassChart(); renderConfChart(); renderTimeline(); renderDest(); renderFlow(); renderTable();
+  // Cards show/hide between files, so let every chart re-measure its container.
+  requestAnimationFrame(() => document.querySelectorAll('#viewAnalyze .js-plotly-plot').forEach(el => {
+    if (el.offsetParent) Plotly.Plots.resize(el); }));
+}
+
+function renderClassChart() {
+  const d = DATA, hide = $('#hideBenign').checked;
+  const cls = ORDER.filter(c => d.classes.includes(c) && !(hide && c === 'BENIGN')).reverse();
+  const x = cls.map(c => d.counts[c] || 0);
+  Plotly.react('chClass', [{
+    type: 'bar', orientation: 'h', y: cls, x, marker: {color: cls.map(colorOf), line: {width: 0}},
+    text: x.map(v => v ? fmt(v) : ''), textposition: 'outside', cliponaxis: false,
+    textfont: {color: css('--text-2')},
+    hovertemplate: '%{y}: %{x:,} flows<extra></extra>',
+  }], baseLayout({margin: {l: 86, r: 50, t: 4, b: 30}, xaxis: {gridcolor: css('--grid'), zeroline: false}}), CFG);
+  const el = $('#chClass');
+  el.removeAllListeners && el.removeAllListeners('plotly_click');
+  el.on('plotly_click', ev => { $('#fClass').value = ev.points[0].y; renderTable(); });
+}
+$('#hideBenign').onchange = renderClassChart;
+
+function renderConfChart() {
+  const bins = [0.3,0.4,0.5,0.6,0.7,0.8,0.9,1.0001];
+  const labels = ['30–40%','40–50%','50–60%','60–70%','70–80%','80–90%','90–100%'];
+  const counts = labels.map(() => 0);
+  // Use every returned row; good enough even when the table is truncated (attacks always kept).
+  DATA.rows.forEach(r => { for (let i = 0; i < labels.length; i++) if (r.conf < bins[i+1]) { counts[i]++; break; } });
+  const col = labels.map((_, i) => i < 3 ? css('--warning') : css('--accent'));
+  Plotly.react('chConf', [{type: 'bar', x: labels, y: counts, marker: {color: col},
+    text: counts.map(v => v ? fmt(v) : ''), textposition: 'outside', cliponaxis: false, textfont: {color: css('--text-2')},
+    hovertemplate: '%{x}: %{y:,} flows<extra></extra>'}],
+    baseLayout({margin: {l: 48, r: 12, t: 4, b: 36}}), CFG);
+}
+
+function renderTimeline() {
+  const tl = DATA.timeline;
+  $('#tlCard').classList.toggle('hidden', !tl);
+  if (!tl) return;
+  $('#tlHint').textContent = `Flows per ${tl.bucket === '1s' ? 'second' : tl.bucket === '1min' ? 'minute' : 'hour'}, stacked by predicted class.`;
+  const traces = ORDER.filter(c => tl.series[c]).map(c => ({
+    type: 'bar', name: c, x: tl.t, y: tl.series[c], marker: {color: colorOf(c), line: {color: css('--surface'), width: 1}},
+    hovertemplate: c + ': %{y:,}<extra></extra>'}));
+  Plotly.react('chTime', traces, baseLayout({barmode: 'stack', showlegend: traces.length > 1,
+    legend: {orientation: 'h', y: 1.12, x: 0}, hovermode: 'x unified', margin: {l: 48, r: 12, t: 24, b: 36}}), CFG);
+}
+
+function renderDest() {
+  const rows = DATA.rows;
+  const has = DATA.has_ids.includes('dst');
+  $('#destCard').classList.toggle('hidden', !has);
+  if (!has) return;
+  const agg = {};
+  rows.forEach(r => { const k = r.dst + (r.dport ? ':' + r.dport : ''); (agg[k] ||= {n: 0}); agg[k].n++; agg[k][r.pred] = (agg[k][r.pred] || 0) + 1; });
+  const top = Object.entries(agg).sort((a, b) => b[1].n - a[1].n).slice(0, 10).reverse();
+  const y = top.map(t => t[0]);
+  const traces = ORDER.filter(c => top.some(t => t[1][c])).map(c => ({
+    type: 'bar', orientation: 'h', name: c, y, x: top.map(t => t[1][c] || 0),
+    marker: {color: colorOf(c), line: {color: css('--surface'), width: 1}},
+    hovertemplate: '%{y}<br>' + c + ': %{x:,}<extra></extra>'}));
+  Plotly.react('chDest', traces, baseLayout({barmode: 'stack', showlegend: traces.length > 1,
+    legend: {orientation: 'h', y: 1.1, x: 0}, margin: {l: 150, r: 12, t: 24, b: 30}}), CFG);
+}
+
+function renderFlow() {
+  if (!selected) {
+    Plotly.react('chFlow', [], baseLayout({xaxis: {visible: false}, yaxis: {visible: false},
+      annotations: [{text: 'No flow selected', showarrow: false, xref: 'paper', yref: 'paper', x: 0.5, y: 0.5, font: {color: css('--muted'), size: 13}}]}), CFG);
+    $('#flowHint').textContent = 'Click a row in the table below to see every class probability.';
+    return;
+  }
+  const r = selected, cls = DATA.classes.slice().reverse(), p = r.p.slice().reverse();
+  $('#flowHint').textContent = `Flow #${r.i}` + (r.src ? ` · ${r.src}:${r.sport || ''} → ${r.dst}:${r.dport || ''}` : '') +
+    ` · predicted ${r.pred}` + (r.truth ? ` · CSV label ${r.truth}` : '');
+  Plotly.react('chFlow', [{type: 'bar', orientation: 'h', y: cls, x: p, marker: {color: cls.map(colorOf)},
+    text: p.map(v => pct(v)), textposition: 'outside', cliponaxis: false, textfont: {color: css('--text-2')},
+    hovertemplate: '%{y}: %{x:.1%}<extra></extra>'}],
+    baseLayout({xaxis: {range: [0, 1.15], tickformat: '.0%', gridcolor: css('--grid')}, margin: {l: 86, r: 12, t: 4, b: 30}}), CFG);
+}
+
+/* ---------- table ---------- */
+const COLS = () => [
+  ['i', '#'], ...(DATA.has_ids.includes('ts') ? [['ts', 'Time']] : []),
+  ...(DATA.has_ids.includes('src') ? [['src', 'Source'], ['sport', 'Port']] : []),
+  ...(DATA.has_ids.includes('dst') ? [['dst', 'Destination'], ['dport', 'Port']] : []),
+  ...(DATA.has_ids.includes('proto') ? [['proto', 'Proto']] : []),
+  ['pred', 'Predicted'], ['conf', 'Confidence'], ...(DATA.truth_accuracy != null ? [['truth', 'CSV label']] : []),
+];
+function filtered() {
+  const c = $('#fClass').value, q = $('#fSearch').value.trim(), maxc = +$('#fConf').value;
+  return DATA.rows.filter(r => (!c || r.pred === c) && (maxc >= 1 || r.conf < maxc) &&
+    (!q || [r.src, r.dst, r.sport, r.dport].some(v => v && String(v).includes(q))));
+}
+function renderTable() {
+  const cols = COLS();
+  $('#tbl thead').innerHTML = '<tr>' + cols.map(([k, l]) => `<th data-k="${k}">${l}${sortKey === k ? (sortDir > 0 ? ' ▲' : ' ▼') : ''}</th>`).join('') + '</tr>';
+  let rows = filtered();
+  rows = rows.slice().sort((a, b) => { const x = a[sortKey], y = b[sortKey];
+    return (typeof x === 'number' ? x - y : String(x ?? '').localeCompare(String(y ?? ''), undefined, {numeric: true})) * sortDir; });
+  $('#fCount').textContent = `${fmt(rows.length)} flows`;
+  const shown = rows.slice(0, 1000);
+  $('#tbl tbody').innerHTML = shown.map(r => `<tr data-i="${r.i}"${selected && selected.i === r.i ? ' class="sel"' : ''}>` + cols.map(([k]) => {
+    if (k === 'pred') return `<td><span class="badge"><span class="dot" style="background:${colorOf(r.pred)}"></span>${r.pred}</span></td>`;
+    if (k === 'conf') return `<td><span class="confbar"><i style="width:${r.conf*100}%;background:${r.conf < 0.6 ? css('--warning') : css('--text-2')}"></i></span>${pct(r.conf)}</td>`;
+    if (k === 'truth') return `<td${r.truth !== r.pred ? ' style="color:var(--critical);font-weight:600"' : ''}>${r.truth}</td>`;
+    return `<td>${r[k] ?? ''}</td>`; }).join('') + '</tr>').join('');
+  $('#tblNote').textContent = (rows.length > 1000 ? `Showing the first 1,000 of ${fmt(rows.length)} matching flows. Use the filters or download the CSV for all of them. ` : '') +
+    (DATA.rows_truncated ? `The file has ${fmt(DATA.n_flows)} flows; the browser received every flagged flow plus a share of benign ones.` : '');
+}
+$('#tbl thead').onclick = ev => { const k = ev.target.closest('th')?.dataset.k; if (!k) return;
+  sortDir = sortKey === k ? -sortDir : (k === 'conf' ? 1 : 1); sortKey = k; renderTable(); };
+$('#tbl tbody').onclick = ev => { const tr = ev.target.closest('tr'); if (!tr) return;
+  selected = DATA.rows.find(r => r.i === +tr.dataset.i); renderFlow(); renderTable(); };
+$('#fClass').onchange = renderTable; $('#fSearch').oninput = renderTable;
+$('#fConf').oninput = () => { const v = +$('#fConf').value; $('#fConfV').textContent = v >= 1 ? 'any' : pct(v, 0); renderTable(); };
+$('#fConfV').textContent = 'any';
+$('#dlBtn').onclick = () => {
+  const cols = ['i', ...DATA.has_ids, 'pred', 'conf', ...DATA.classes.map(c => 'p_' + c), ...(DATA.truth_accuracy != null ? ['truth'] : [])];
+  const esc = v => { v = v ?? ''; v = String(v); return /[",\n]/.test(v) ? '"' + v.replace(/"/g, '""') + '"' : v; };
+  const lines = [cols.join(',')].concat(filtered().map(r => cols.map(k => k.startsWith('p_') ? r.p[DATA.classes.indexOf(k.slice(2))] : esc(r[k])).join(',')));
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([lines.join('\n')], {type: 'text/csv'}));
+  a.download = (DATA.source.split(' ')[0].replace(/\.csv$/, '')) + '_predictions.csv'; a.click();
+};
+
+/* ---------- model view ---------- */
+async function loadMetrics() {
+  METRICS = await (await fetch('/api/metrics')).json();
+  const b = METRICS.models[METRICS.best_model];
+  $('#modelLine').textContent = `Model: ${METRICS.best_model} · macro F1 ${b.macro_f1.toFixed(3)} · ${METRICS.n_features} features · trained on CIC-IDS2017`;
+  $('#cmModel').innerHTML = Object.keys(METRICS.models).map(m => `<option${m === METRICS.best_model ? ' selected' : ''}>${m}</option>`).join('');
+  $('#cmModel').onchange = renderModel;
+}
+function renderModel() {
+  if (!METRICS) return;
+  const ms = Object.entries(METRICS.models).sort((a, b) => b[1].macro_f1 - a[1].macro_f1);
+  $('#cmpTbl thead').innerHTML = '<tr><th>Model</th><th>Macro F1</th><th>Accuracy</th><th>Attack detection</th><th>False alarms</th><th>Train time</th></tr>';
+  $('#cmpTbl tbody').innerHTML = ms.map(([m, v]) => `<tr><td><b>${m}</b>${m === METRICS.best_model ? ' <span class="badge">in use</span>' : ''}</td>
+    <td>${v.macro_f1.toFixed(4)}</td><td>${pct(v.accuracy, 2)}</td><td>${pct(v.attack_detection_rate, 2)}</td>
+    <td>${pct(v.false_alarm_rate, 3)}</td><td>${v.fit_seconds ?? '–'} s</td></tr>`).join('');
+
+  const classes = METRICS.classes, names = ms.map(m => m[0]);
+  const z = names.map(m => classes.map(c => METRICS.models[m].per_class[c].f1));
+  Plotly.react('chF1', [{type: 'heatmap', x: classes, y: names, z, zmin: 0, zmax: 1,
+    colorscale: [[0, css('--surface-2')], [0.5, '#86b6ef'], [0.8, '#2a78d6'], [1, '#104281']],
+    xgap: 2, ygap: 2, showscale: false,
+    text: z.map(r => r.map(v => v.toFixed(2))), texttemplate: '%{text}',
+    hovertemplate: '%{y} · %{x}<br>F1 %{z:.3f}<extra></extra>'}],
+    baseLayout({margin: {l: 100, r: 8, t: 4, b: 40}, yaxis: {autorange: 'reversed'}}), CFG);
+
+  const m = $('#cmModel').value || METRICS.best_model, cm = METRICS.models[m].confusion_matrix;
+  const norm = cm.map(r => { const s = r.reduce((a, b) => a + b, 0) || 1; return r.map(v => v / s); });
+  Plotly.react('chCM', [{type: 'heatmap', x: classes, y: classes, z: norm, zmin: 0, zmax: 1,
+    colorscale: [[0, css('--surface-2')], [0.02, '#cde2fb'], [0.3, '#5598e7'], [1, '#104281']],
+    xgap: 2, ygap: 2, showscale: false, customdata: cm,
+    text: norm.map(r => r.map(v => v >= 0.0005 ? (v * 100).toFixed(v < 0.1 ? 1 : 0) : '')), texttemplate: '%{text}',
+    hovertemplate: 'True %{y} → predicted %{x}<br>%{customdata:,} flows (%{z:.2%})<extra></extra>'}],
+    baseLayout({margin: {l: 110, r: 8, t: 4, b: 60}, yaxis: {autorange: 'reversed', title: {text: 'True', standoff: 14}},
+      xaxis: {title: {text: 'Predicted'}}}), CFG);
+}
+
+function rerenderModelSize() { document.querySelectorAll('#viewModel .js-plotly-plot').forEach(el => Plotly.Plots.resize(el)); }
+function rerender() { if (!$('#viewModel').classList.contains('hidden')) renderModel(); else renderAll(); }
+loadMetrics().catch(e => $('#modelLine').textContent = 'Could not load model metrics: ' + e.message);
+</script>
+</body>
+</html>
