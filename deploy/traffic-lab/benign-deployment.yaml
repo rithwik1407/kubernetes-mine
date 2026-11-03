@@ -1,0 +1,42 @@
+# Continuous low-rate benign traffic against the lab services (the baseline).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-benign
+  namespace: ids-traffic
+  labels: {app: traffic-lab, scenario: benign}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: traffic-lab, scenario: benign}
+  template:
+    metadata:
+      labels: {app: traffic-lab, scenario: benign}
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: generator
+          image: python:3.13-alpine
+          command: ["python", "/app/traffic_generator.py"]
+          env:
+            - {name: MODE, value: benign}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+            - {name: MIN_DELAY, value: "1.0"}
+            - {name: MAX_DELAY, value: "4.0"}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: script, mountPath: /app, readOnly: true}
+      volumes:
+        - name: script
+          configMap: {name: traffic-generator-script}

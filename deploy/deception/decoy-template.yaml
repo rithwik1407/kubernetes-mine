@@ -1,0 +1,77 @@
+# Predefined decoy manifest. The controller substitutes only ${name}, ${profile},
+# ${port} and ${replicas}, each validated against config before rendering.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${name}
+  labels:
+    app.kubernetes.io/component: decoy
+    app.kubernetes.io/managed-by: ids-deception-controller
+    ids/decoy: ${name}
+    ids/profile: ${profile}
+spec:
+  replicas: ${replicas}
+  selector:
+    matchLabels:
+      ids/decoy: ${name}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: decoy
+        app.kubernetes.io/managed-by: ids-deception-controller
+        ids/decoy: ${name}
+        ids/profile: ${profile}
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: decoy
+          image: python:3.13-alpine
+          command: ["python", "/app/decoy_server.py"]
+          env:
+            - {name: PROFILE, value: "${profile}"}
+            - {name: DECOY_NAME, value: "${name}"}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+            - {name: PYTHONUNBUFFERED, value: "1"}
+          ports:
+            - {name: http, containerPort: 8080}
+            - {name: health, containerPort: 8081}
+          readinessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 2
+          livenessProbe:
+            httpGet: {path: /healthz, port: health}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 10m, memory: 24Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            privileged: false
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: app, mountPath: /app, readOnly: true}
+      volumes:
+        - name: app
+          configMap: {name: decoy-server}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${name}
+  labels:
+    app.kubernetes.io/component: decoy
+    app.kubernetes.io/managed-by: ids-deception-controller
+    ids/decoy: ${name}
+    ids/profile: ${profile}
+spec:
+  selector:
+    ids/decoy: ${name}
+  ports:
+    - {name: http, port: ${port}, targetPort: http}

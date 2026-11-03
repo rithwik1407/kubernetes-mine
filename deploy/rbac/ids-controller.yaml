@@ -1,0 +1,72 @@
+# Least-privilege identity for the backend / MAPE-K controller / traffic lab.
+# No cluster-admin:
+#   * manage decoy Deployments/Services and read pod logs in ids-deception
+#   * manage traffic-lab Jobs and read pod logs in ids-traffic
+#   * read-only on the lab namespaces, nodes and namespace list for the status page
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: ids-controller, namespace: ids-deception}
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: ids-controller-token
+  namespace: ids-deception
+  annotations: {kubernetes.io/service-account.name: ids-controller}
+type: kubernetes.io/service-account-token
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ids-deception-manager, namespace: ids-deception}
+rules:
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","list","watch","create","patch","delete"]}
+  - {apiGroups: ["apps"], resources: ["deployments/scale"], verbs: ["get","patch"]}
+  - {apiGroups: [""], resources: ["services"], verbs: ["get","list","create","delete"]}
+  - {apiGroups: [""], resources: ["pods","events"], verbs: ["get","list"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ids-deception-manager, namespace: ids-deception}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ids-deception-manager}
+---
+# Traffic lab: create and tear down scenario Jobs, read their pods and logs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ids-traffic-manager, namespace: ids-traffic}
+rules:
+  - {apiGroups: ["batch"], resources: ["jobs"], verbs: ["get","list","watch","create","delete"]}
+  - {apiGroups: [""], resources: ["pods","events","services"], verbs: ["get","list"]}
+  - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
+  - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ids-traffic-manager, namespace: ids-traffic}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ids-traffic-manager}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ids-viewer, namespace: target-apps}
+rules:
+  - {apiGroups: ["","apps"], resources: ["pods","services","events","deployments"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ids-viewer, namespace: target-apps}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ids-viewer}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: ids-cluster-viewer}
+rules:
+  - {apiGroups: [""], resources: ["nodes","namespaces"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: ids-cluster-viewer}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ids-cluster-viewer}

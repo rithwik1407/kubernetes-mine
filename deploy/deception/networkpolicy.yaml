@@ -1,0 +1,24 @@
+# Decoys accept connections only from the lab namespaces on the decoy port and
+# may not open any outbound connection.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: decoy-isolation
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: decoy
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ids-traffic
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: target-apps
+      ports:
+        - {protocol: TCP, port: 8080}
+    - ports:   # kubelet readiness/liveness probes
+        - {protocol: TCP, port: 8081}
+  egress: []

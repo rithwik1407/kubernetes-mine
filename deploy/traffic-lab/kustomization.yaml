@@ -1,0 +1,16 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: ids-traffic
+
+resources:
+  - networkpolicy.yaml
+  - benign-deployment.yaml
+
+# The generator script is shipped as a ConfigMap so the pods need no custom image.
+configMapGenerator:
+  - name: traffic-generator-script
+    files:
+      - traffic_generator.py
+
+generatorOptions:
+  disableNameSuffixHash: true

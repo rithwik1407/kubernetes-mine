@@ -1,0 +1,40 @@
+# Traffic-lab pods may reach only the lab target services, the decoys in
+# ids-deception, and cluster DNS. Any other egress fails (Network unreachable).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traffic-lab-egress
+  namespace: ids-traffic
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: target-apps
+      ports:
+        - {protocol: TCP, port: 1880}
+        - {protocol: TCP, port: 3000}
+        - {protocol: TCP, port: 8086}
+        - {protocol: TCP, port: 22}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ids-deception
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: decoy
+      ports:
+        - {protocol: TCP, port: 8080}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}

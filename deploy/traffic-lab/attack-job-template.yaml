@@ -1,0 +1,48 @@
+# Template for one bounded traffic-lab scenario, launched from the dashboard
+# (the backend fills the __PLACEHOLDERS__ and creates the Job through the API).
+# It can also be run by hand with envsubst:
+#   MODE=port_scan TARGET=nodered.target-apps.svc.cluster.local:1880 \
+#     envsubst < attack-job-template.yaml | kubectl create -f -
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: traffic-__MODE__-
+  namespace: ids-traffic
+  labels: {app: traffic-lab, scenario: __MODE__}
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 3600
+  template:
+    metadata:
+      labels: {app: traffic-lab, scenario: __MODE__}
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65534
+        runAsGroup: 65534
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: generator
+          image: python:3.13-alpine
+          command: ["python", "/app/traffic_generator.py"]
+          env:
+            - {name: MODE, value: "__MODE__"}
+            - {name: TARGET, value: "__TARGET__"}
+            - {name: COUNT, value: "__COUNT__"}
+            - {name: DELAY, value: "__DELAY__"}
+            - {name: PYTHONDONTWRITEBYTECODE, value: "1"}
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 200m, memory: 96Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: script, mountPath: /app, readOnly: true}
+      volumes:
+        - name: script
+          configMap: {name: traffic-generator-script}

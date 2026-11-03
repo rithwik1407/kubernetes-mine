@@ -1,0 +1,61 @@
+{
+  "web-portal": {
+    "server_header": "nginx",
+    "routes": {
+      "/": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Operations Portal</title></head><body><a href=\"/login\">Staff login</a></body></html>"},
+      "/login": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Operations Portal - Login</title></head><body><form method=\"post\" action=\"/login\">Login</form></body></html>"},
+      "/admin": {"status": 302, "type": "text/html", "body": "<a href=\"/login\">Moved</a>"},
+      "/api": {"status": 200, "type": "application/json", "body": "{\"service\":\"ops-portal\",\"endpoints\":[\"/api/status\",\"/api/reports\"]}"},
+      "/api/status": {"status": 200, "type": "application/json", "body": "{\"status\":\"ok\",\"uptime_s\":86400}"},
+      "/api/reports": {"status": 401, "type": "application/json", "body": "{\"error\":\"login required\"}"},
+      "/robots.txt": {"status": 200, "type": "text/plain", "body": "User-agent: *\nDisallow: /admin\nDisallow: /backup\n"},
+      "/backup": {"status": 403, "type": "text/html", "body": "<h1>403 Forbidden</h1>"},
+      "/search": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Search</title></head><body>No results.</body></html>"}
+    }
+  },
+  "ssh-sentinel": {
+    "server_header": "nginx",
+    "routes": {
+      "/": {"status": 200, "type": "text/plain", "body": "SSH management console. Direct SSH on port 2222."},
+      "/status": {"status": 200, "type": "application/json", "body": "{\"service\":\"ssh-gateway\",\"auth\":\"password\",\"banner\":\"SSH-2.0-OpenSSH_8.9\"}"},
+      "/login": {"status": 401, "type": "application/json", "body": "{\"error\":\"authentication required\"}"}
+    }
+  },
+  "nodered": {
+    "server_header": "Express",
+    "routes": {
+      "/": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Flow Editor</title></head><body><div id=\"editor\">Loading flow editor...</div></body></html>"},
+      "/settings": {"status": 200, "type": "application/json", "body": "{\"editorTheme\":{\"projects\":{\"enabled\":false}},\"flowFilePretty\":true}"},
+      "/flows": {"status": 200, "type": "application/json", "body": "[{\"id\":\"tab-01\",\"type\":\"tab\",\"label\":\"Sensor ingest\"}]"},
+      "/auth/login": {"status": 200, "type": "application/json", "body": "{\"type\":\"credentials\",\"prompts\":[{\"id\":\"username\",\"type\":\"text\"}]}"}
+    }
+  },
+  "grafana": {
+    "server_header": "nginx",
+    "routes": {
+      "/": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Metrics Dashboard</title></head><body><form action=\"/login\" method=\"post\">Sign in</form></body></html>"},
+      "/login": {"status": 200, "type": "text/html", "body": "<!doctype html><html><head><title>Metrics Dashboard - Sign in</title></head><body><form method=\"post\">Sign in</form></body></html>"},
+      "/api/health": {"status": 200, "type": "application/json", "body": "{\"database\":\"ok\"}"},
+      "/api/dashboards/home": {"status": 401, "type": "application/json", "body": "{\"message\":\"Unauthorized\"}"}
+    }
+  },
+  "influxdb": {
+    "server_header": "nginx",
+    "routes": {
+      "/ping": {"status": 204, "type": "text/plain", "body": ""},
+      "/health": {"status": 200, "type": "application/json", "body": "{\"status\":\"pass\",\"message\":\"ready for queries and writes\"}"},
+      "/query": {"status": 401, "type": "application/json", "body": "{\"error\":\"authorization required\"}"},
+      "/write": {"status": 401, "type": "application/json", "body": "{\"error\":\"authorization required\"}"}
+    }
+  },
+  "k8s-inventory": {
+    "server_header": "nginx",
+    "routes": {
+      "/": {"status": 200, "type": "application/json", "body": "{\"service\":\"cluster-inventory\",\"endpoints\":[\"/api/v1/namespaces\",\"/api/v1/pods\",\"/version\"]}"},
+      "/version": {"status": 200, "type": "application/json", "body": "{\"gitVersion\":\"v1.29.0\",\"platform\":\"linux/amd64\"}"},
+      "/api/v1/namespaces": {"status": 401, "type": "application/json", "body": "{\"kind\":\"Status\",\"status\":\"Failure\",\"reason\":\"Unauthorized\",\"code\":401}"},
+      "/api/v1/pods": {"status": 401, "type": "application/json", "body": "{\"kind\":\"Status\",\"status\":\"Failure\",\"reason\":\"Unauthorized\",\"code\":401}"},
+      "/metrics": {"status": 200, "type": "text/plain", "body": "# HELP up 1\nup 1\n"}
+    }
+  }
+}
