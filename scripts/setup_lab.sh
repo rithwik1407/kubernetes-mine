@@ -6,8 +6,9 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 echo "== Python environment"
-[ -d .venv ] || python3 -m venv .venv
-. .venv/bin/activate
+VENV="${IDS_VENV:-$HOME/.venv-ids}"
+[ -f "$VENV/bin/activate" ] || python3 -m venv "$VENV"
+. "$VENV/bin/activate"
 pip install -q -r requirements.txt
 
 echo "== tcpdump (capture without sudo)"
