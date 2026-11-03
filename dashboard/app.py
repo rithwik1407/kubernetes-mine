@@ -40,10 +40,32 @@ ID_COLS = {"srcip": "src", "sourceip": "src", "dstip": "dst", "destinationip": "
 app = FastAPI(title="K3s IDS dashboard")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
 
+# Live pipeline, traffic lab, deception and cluster endpoints. Optional: if the
+# live package or its deps are unavailable, the CSV scorer still runs.
+try:
+    from live_api import router as live_router
+    app.include_router(live_router)
+    LIVE_ENABLED = True
+except Exception as _live_err:  # noqa: BLE001
+    LIVE_ENABLED = False
+    _LIVE_IMPORT_ERROR = str(_live_err)
+
+
+@app.get("/api/features")
+def features():
+    """Which parts of the dashboard are available in this deployment."""
+    return {"live": LIVE_ENABLED, "live_error": None if LIVE_ENABLED else _LIVE_IMPORT_ERROR}
+
 
 @app.get("/")
 def index():
     return FileResponse(HERE / "static" / "index.html")
+
+
+@app.get("/live")
+def live_page():
+    """The live SOC dashboard (capture, traffic lab, deception, cluster)."""
+    return FileResponse(HERE / "static" / "live.html")
 
 
 @app.get("/api/metrics")

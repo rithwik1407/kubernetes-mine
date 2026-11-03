@@ -1,6 +1,6 @@
 """Kubernetes operations for decoys (the MAPE-K Execute stage).
 
-Decoys are rendered from the predefined kubernetes/deception/decoy-template.yaml
+Decoys are rendered from the predefined deploy/deception/decoy-template.yaml
 and managed only in the deception namespace, using the least-privilege
 ids-controller service account. Only resources labelled
 app.kubernetes.io/managed-by=ids-deception-controller are ever modified.
@@ -44,7 +44,7 @@ class DecoyManager:
         if api_client is None:
             kubeconfig = project_path(d["kubeconfig"])
             if not kubeconfig.is_file():
-                raise DecoyError(f"{kubeconfig} missing; run kubernetes/rbac/create-kubeconfig.sh")
+                raise DecoyError(f"{kubeconfig} missing; run deploy/rbac/create-kubeconfig.sh")
             api_client = kconfig.new_client_from_config(config_file=str(kubeconfig))
         self.apps = client.AppsV1Api(api_client)
         self.core = client.CoreV1Api(api_client)
