@@ -14,8 +14,8 @@ packet-by-packet real-time detection.
 from __future__ import annotations
 
 import argparse
-import fcntl
 import json
+import platform
 import os
 import queue
 import signal
@@ -33,12 +33,42 @@ from live import db
 from live.config import REPO_ROOT as PROJECT_ROOT, get_path, load_config, project_path
 from live.logging_setup import get_logger
 
+try:  # POSIX only; capture itself needs Linux, but importing this module must never fail
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+
 log = get_logger(__name__)
 LOCK_NAME = "capture.lock"
 
 
 class ServiceError(RuntimeError):
     pass
+
+
+def support(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Can packet capture run on this machine? Never raises."""
+    cfg = cfg or load_config()
+    c = cfg["capture"]
+    if platform.system() != "Linux":
+        return {"supported": False, "reason": f"live capture needs Linux (this is {platform.system()}). "
+                "Run the dashboard inside WSL2 / on the K3s host — see docs/live-system.md"}
+    if not Path(c["tcpdump"]).exists():
+        return {"supported": False, "reason": f"tcpdump not found at {c['tcpdump']} (sudo apt install tcpdump)"}
+    if not Path("/sys/class/net", c["interface"]).exists():
+        return {"supported": False, "reason": f"network interface {c['interface']} not found "
+                "(K3s pod bridge; set capture.interface in config/live.yaml)"}
+    return {"supported": True, "reason": None}
+
+
+def _lock(fh) -> bool:
+    if fcntl is None:
+        return True
+    try:
+        fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
 
 
 def _paths(cfg: dict[str, Any]) -> tuple[Path, Path, Path]:
@@ -76,7 +106,10 @@ def _service_pid(pid_file: Path) -> int | None:
     """PID from the pid file, only if that process really is this service."""
     try:
         pid = int(pid_file.read_text().strip())
-        cmdline = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode()
+        proc = Path(f"/proc/{pid}/cmdline")
+        if not proc.exists():
+            return None
+        cmdline = proc.read_bytes().replace(b"\0", b" ").decode()
     except (OSError, ValueError):
         return None
     return pid if "live.capture" in cmdline else None
@@ -101,9 +134,7 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
     pid_file, _, lock_file = _paths(cfg)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     lock_fh = open(lock_file, "w")
-    try:
-        fcntl.flock(lock_fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except BlockingIOError:
+    if not _lock(lock_fh):
         lock_fh.close()
         raise ServiceError("another capture process is already running")
 
@@ -177,7 +208,8 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
         with lock:
             write_state(cfg, **{**base, **final}, stopped_at=_now(), **stats)
         pid_file.unlink(missing_ok=True)
-        fcntl.flock(lock_fh, fcntl.LOCK_UN)
+        if fcntl:
+            fcntl.flock(lock_fh, fcntl.LOCK_UN)
         lock_fh.close()
     return stats
 
@@ -185,6 +217,9 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
 def start(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     pid_file, _, _ = _paths(cfg)
+    sup = support(cfg)
+    if not sup["supported"]:
+        raise ServiceError(sup["reason"])
     if _service_pid(pid_file):
         raise ServiceError("capture service is already running")
     validate_interface(cfg["capture"]["interface"])

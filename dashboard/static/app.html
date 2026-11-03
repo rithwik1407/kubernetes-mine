@@ -1,0 +1,522 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>K3s IDS Console</title>
+<script src="/static/plotly.min.js"></script>
+<style>
+:root {
+  color-scheme: light;
+  --bg: #f3f4f7; --surface: #ffffff; --surface-2: #f3f4f7; --border: #e3e5ea;
+  --text: #12151c; --text-2: #4b5160; --muted: #8b91a1; --grid: #eceef2;
+  --accent: #3b6cf6; --accent-soft: #e8eeff; --critical: #d6393b; --good: #12a150; --warning: #c78100;
+  --side: #0f1424; --side-2: #1a2138; --side-text: #aab2c8; --side-on: #ffffff;
+  --c-benign: #a9adb8; --c-dos: #3b6cf6; --c-ddos: #eb6834; --c-portscan: #1baf7a;
+  --c-bruteforce: #eda100; --c-webattack: #e87ba4; --c-bot: #7a5af8;
+  --shadow: 0 1px 2px rgba(16,24,40,.05), 0 1px 3px rgba(16,24,40,.06);
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  color-scheme: dark; --bg: #0c0f17; --surface: #151a26; --surface-2: #1c2231; --border: #262d3f;
+  --text: #eef0f6; --text-2: #b5bccd; --muted: #7f879b; --grid: #232a3b;
+  --accent: #5b8cff; --accent-soft: #1d2a52; --critical: #ef6a6c; --good: #36c273; --warning: #f0b429;
+  --side: #090c14; --side-2: #131a2b; --shadow: none; } }
+:root[data-theme="dark"] {
+  color-scheme: dark; --bg: #0c0f17; --surface: #151a26; --surface-2: #1c2231; --border: #262d3f;
+  --text: #eef0f6; --text-2: #b5bccd; --muted: #7f879b; --grid: #232a3b;
+  --accent: #5b8cff; --accent-soft: #1d2a52; --critical: #ef6a6c; --good: #36c273; --warning: #f0b429;
+  --side: #090c14; --side-2: #131a2b; --shadow: none; }
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.5 Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display: flex; }
+
+/* ---- sidebar ---- */
+aside { width: 236px; flex: none; background: var(--side); color: var(--side-text); display: flex; flex-direction: column;
+  padding: 18px 12px; position: sticky; top: 0; height: 100vh; overflow-y: auto; }
+.brand { display: flex; align-items: center; gap: 10px; padding: 4px 8px 18px; color: var(--side-on); }
+.logo { width: 32px; height: 32px; border-radius: 9px; background: linear-gradient(135deg, #3b6cf6, #7a5af8);
+  display: grid; place-items: center; box-shadow: 0 4px 14px rgba(59,108,246,.45); }
+.brand b { font-size: 15px; display: block; line-height: 1.1; } .brand small { color: var(--side-text); font-size: 11.5px; }
+.navlabel { font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: #5d667f; padding: 14px 10px 6px; }
+aside nav button { all: unset; box-sizing: border-box; display: flex; align-items: center; gap: 11px; width: 100%;
+  padding: 9px 11px; border-radius: 9px; cursor: pointer; color: var(--side-text); font-size: 13.5px; margin-bottom: 2px; }
+aside nav button:hover { background: var(--side-2); color: var(--side-on); }
+aside nav button.on { background: var(--accent); color: #fff; box-shadow: 0 4px 12px rgba(59,108,246,.35); }
+aside nav svg { width: 18px; height: 18px; flex: none; stroke: currentColor; fill: none; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+aside nav .count { margin-left: auto; font-size: 11px; background: var(--critical); color: #fff; border-radius: 999px; padding: 0 7px; }
+.side-foot { margin-top: auto; padding: 12px 10px 0; border-top: 1px solid #1f2740; font-size: 12px; }
+.side-foot .pods { display: flex; flex-direction: column; gap: 6px; margin: 8px 0 12px; }
+.side-foot .pods div { display: flex; align-items: center; gap: 8px; }
+.side-foot button.theme { all: unset; cursor: pointer; color: var(--side-text); font-size: 12px; }
+.side-foot button.theme:hover { color: #fff; }
+
+/* ---- main ---- */
+.main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.topbar { display: flex; align-items: center; gap: 12px; padding: 14px 28px; background: var(--surface); border-bottom: 1px solid var(--border);
+  position: sticky; top: 0; z-index: 20; flex-wrap: wrap; }
+.topbar h1 { font-size: 18px; margin: 0; font-weight: 650; } .topbar .sub { color: var(--text-2); font-size: 12.5px; }
+.chips { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border-radius: 999px; border: 1px solid var(--border);
+  background: var(--surface); font-size: 12.5px; color: var(--text-2); cursor: default; }
+.chip b { color: var(--text); font-weight: 600; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); display: inline-block; flex: none; }
+.dot.ok { background: var(--good); box-shadow: 0 0 0 0 rgba(18,161,80,.5); animation: pulse 2s infinite; }
+.dot.warn { background: var(--warning); } .dot.bad { background: var(--critical); }
+@keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(18,161,80,.45); } 70% { box-shadow: 0 0 0 7px rgba(18,161,80,0); } 100% { box-shadow: 0 0 0 0 rgba(18,161,80,0); } }
+.content { padding: 22px 28px 60px; max-width: 1500px; width: 100%; margin: 0 auto; }
+.content.flush { padding: 0; max-width: none; }
+iframe#scorer { width: 100%; border: 0; height: calc(100vh - 70px); display: block; background: transparent; }
+
+.grid { display: grid; gap: 16px; }
+.g-kpi { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.g-2 { grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); }
+.g-3 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px; box-shadow: var(--shadow); }
+.card h2 { font-size: 14.5px; margin: 0 0 2px; font-weight: 650; }
+.card .hint { color: var(--text-2); font-size: 12.5px; margin: 0 0 10px; }
+.kpi { position: relative; overflow: hidden; }
+.kpi::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: var(--accent); }
+.kpi.bad::before { background: var(--critical); } .kpi.good::before { background: var(--good); }
+.kpi .label { color: var(--text-2); font-size: 12px; } .kpi .value { font-size: 28px; font-weight: 680; font-variant-numeric: tabular-nums; line-height: 1.15; margin-top: 2px; }
+.kpi.bad .value { color: var(--critical); } .kpi .note { color: var(--muted); font-size: 11.5px; }
+.mt { margin-top: 16px; } .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; } .between { justify-content: space-between; }
+.muted { color: var(--muted); } .hidden { display: none !important; }
+.btn { border: 1px solid var(--border); background: var(--surface); color: var(--text); padding: 8px 14px; border-radius: 9px; cursor: pointer;
+  font: inherit; font-weight: 500; transition: .12s; }
+.btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.primary:hover:not(:disabled) { filter: brightness(1.08); color: #fff; }
+.btn.danger { color: var(--critical); border-color: color-mix(in srgb, var(--critical) 40%, var(--border)); }
+.btn.sm { padding: 3px 10px; font-size: 12px; } .btn:disabled { opacity: .45; cursor: not-allowed; }
+.pill { font-size: 11.5px; padding: 1px 9px; border-radius: 999px; border: 1px solid var(--border); display: inline-block; }
+.pill.ok { color: var(--good); border-color: var(--good); } .pill.warn { color: var(--warning); border-color: var(--warning); }
+.pill.bad { color: var(--critical); border-color: var(--critical); }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 1px 9px; border-radius: 999px; font-size: 12px;
+  border: 1px solid var(--border); background: var(--surface-2); white-space: nowrap; }
+.badge .sq { width: 9px; height: 9px; border-radius: 3px; }
+.chart { width: 100%; height: 280px; }
+.tablewrap { max-height: 430px; overflow: auto; border: 1px solid var(--border); border-radius: 10px; }
+table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; font-size: 12.8px; }
+th, td { padding: 7px 11px; text-align: left; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+th { position: sticky; top: 0; background: var(--surface-2); font-weight: 600; color: var(--text-2); z-index: 1; }
+tbody tr:hover { background: var(--surface-2); }
+select, input[type=number], input[type=text] { padding: 7px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); color: var(--text); font: inherit; }
+label.fld { display: flex; flex-direction: column; gap: 3px; font-size: 12px; color: var(--text-2); }
+.banner { border-radius: 12px; padding: 11px 15px; margin-bottom: 16px; border: 1px solid var(--border); background: var(--surface); }
+.banner.warn { border-left: 4px solid var(--warning); } .banner.bad { border-left: 4px solid var(--critical); } .banner.good { border-left: 4px solid var(--good); }
+code { background: var(--surface-2); padding: 1px 6px; border-radius: 5px; font-size: 12px; }
+pre.fix { background: var(--surface-2); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; margin: 6px 0 0; font-size: 12px; overflow-x: auto; }
+
+/* target app cards */
+.app { display: flex; gap: 12px; align-items: center; padding: 14px 16px; }
+.app .ico { width: 40px; height: 40px; border-radius: 11px; display: grid; place-items: center; font-weight: 700; color: #fff; flex: none; }
+.app .meta { min-width: 0; flex: 1; } .app .meta b { display: block; font-size: 14px; }
+.app .meta small { color: var(--text-2); font-size: 12px; display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.app .st { margin-left: auto; text-align: right; }
+.app.up { border-color: color-mix(in srgb, var(--good) 45%, var(--border)); }
+.app.down { border-color: color-mix(in srgb, var(--critical) 45%, var(--border)); }
+
+/* pipeline stepper */
+.stepper { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin: 12px 0 6px; }
+.step { border: 1px solid var(--border); border-radius: 12px; padding: 11px 13px; background: var(--surface-2); position: relative; }
+.step b { display: block; font-size: 13px; } .step small { color: var(--text-2); font-size: 12px; }
+.step .num { position: absolute; top: 10px; right: 12px; width: 22px; height: 22px; border-radius: 50%; background: var(--border);
+  display: grid; place-items: center; font-size: 11.5px; font-weight: 700; color: var(--text-2); }
+.step.active { border-color: var(--accent); background: var(--accent-soft); } .step.active .num { background: var(--accent); color: #fff; animation: pulse2 1.4s infinite; }
+.step.done { border-color: var(--good); } .step.done .num { background: var(--good); color: #fff; }
+.step.error { border-color: var(--critical); } .step.error .num { background: var(--critical); color: #fff; }
+@keyframes pulse2 { 50% { opacity: .5; } }
+@media (max-width: 760px) { .stepper { grid-template-columns: 1fr 1fr; } }
+.check { display: flex; gap: 9px; align-items: flex-start; padding: 5px 0; font-size: 13px; }
+.check .mark { width: 18px; height: 18px; border-radius: 50%; display: grid; place-items: center; font-size: 11px; color: #fff; flex: none; margin-top: 1px; }
+.check .mark.ok { background: var(--good); } .check .mark.no { background: var(--critical); }
+.scenario { border: 1px solid var(--border); border-radius: 12px; padding: 13px; background: var(--surface); }
+.scenario h3 { margin: 0 0 4px; font-size: 13.5px; text-transform: capitalize; } .scenario p { margin: 0 0 10px; color: var(--text-2); font-size: 12.3px; min-height: 52px; }
+.stage { display: flex; gap: 6px; flex-wrap: wrap; margin: 8px 0; }
+.stage span { padding: 4px 11px; border-radius: 8px; border: 1px solid var(--border); font-size: 12px; color: var(--muted); }
+.stage span.on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.toast { position: fixed; bottom: 22px; left: 50%; transform: translateX(-50%); background: var(--text); color: var(--surface); padding: 10px 18px;
+  border-radius: 10px; font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 60; max-width: 80vw; }
+.toast.show { opacity: 1; }
+@media (max-width: 860px) { body { flex-direction: column; } aside { width: 100%; height: auto; position: static; flex-direction: row; flex-wrap: wrap; padding: 10px; }
+  aside nav { display: flex; flex-wrap: wrap; gap: 4px; } aside nav button { width: auto; } .navlabel, .side-foot, .brand small { display: none; }
+  .content { padding: 16px; } .g-2 { grid-template-columns: 1fr; } iframe#scorer { height: 85vh; } }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand"><div class="logo"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/><path d="M9 12l2 2 4-4"/></svg></div>
+    <div><b>K3s IDS</b><small>Detection &amp; deception</small></div></div>
+  <nav id="nav">
+    <div class="navlabel">Monitor</div>
+    <button data-view="overview" class="on"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="9"/><rect x="14" y="3" width="7" height="5"/><rect x="14" y="12" width="7" height="9"/><rect x="3" y="16" width="7" height="5"/></svg>Overview</button>
+    <button data-view="traffic"><svg viewBox="0 0 24 24"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>Live traffic<span class="count hidden" id="navThreat"></span></button>
+    <button data-view="lab"><svg viewBox="0 0 24 24"><path d="M9 3h6M10 3v6l-5 9a2 2 0 0 0 2 3h10a2 2 0 0 0 2-3l-5-9V3"/></svg>Traffic generator</button>
+    <div class="navlabel">Respond</div>
+    <button data-view="deception"><svg viewBox="0 0 24 24"><path d="M12 3l8 3v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V6z"/></svg>Deception</button>
+    <button data-view="cluster"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Cluster &amp; pods</button>
+    <div class="navlabel">Analyse</div>
+    <button data-view="scorer"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M9 14h6M9 17h4"/></svg>CSV scorer &amp; model</button>
+  </nav>
+  <div class="side-foot">
+    <div class="muted">Target apps</div>
+    <div class="pods" id="sidePods"><div class="muted">checking…</div></div>
+    <button class="theme" id="themeBtn">Toggle theme</button>
+  </div>
+</aside>
+
+<div class="main">
+  <div class="topbar">
+    <div><h1 id="title">Overview</h1><div class="sub" id="subtitle"></div></div>
+    <div class="chips">
+      <span class="chip" id="chipCluster"><span class="dot"></span>Cluster <b>…</b></span>
+      <span class="chip" id="chipPods"><span class="dot"></span>Pods <b>…</b></span>
+      <span class="chip" id="chipCap"><span class="dot"></span>Capture <b>…</b></span>
+      <span class="chip" id="chipDec"><span class="dot"></span>Deception <b>…</b></span>
+    </div>
+  </div>
+  <div class="content" id="content">
+    <div class="banner warn hidden" id="noLive">The live backend is not available in this deployment — only the CSV scorer works.</div>
+
+    <!-- reusable: target pods + pipeline (placed by JS into Live traffic / Generator) -->
+    <template id="tplRun">
+      <div class="card">
+        <div class="row between"><div><h2>Generate traffic &amp; run the pipeline</h2>
+          <p class="hint" style="margin:0">One click: starts capture if needed → launches the scenario → windows are converted and scored automatically.</p></div>
+          <span class="pill" id="runReady">checking…</span></div>
+        <div class="row mt">
+          <label class="fld">Scenario <select class="runScn" style="min-width:210px"></select></label>
+          <label class="fld">Requests <input type="number" class="runCount" value="300" min="1" max="5000" style="width:100px"></label>
+          <label class="fld">Delay (s) <input type="number" class="runDelay" value="0.1" min="0" max="10" step="0.05" style="width:90px"></label>
+          <label class="row" style="gap:6px;align-self:flex-end;padding-bottom:8px"><input type="checkbox" class="runAuto" checked> auto-capture</label>
+          <button class="btn primary runGo" style="align-self:flex-end">▶ Generate &amp; capture</button>
+        </div>
+        <div class="muted runDesc" style="margin-top:8px;font-size:12.5px"></div>
+        <div class="stepper runSteps"></div>
+        <div class="runInfo muted" style="font-size:12.5px"></div>
+      </div>
+    </template>
+
+    <section id="v-overview">
+      <div class="grid g-kpi">
+        <div class="card kpi"><div class="label">Flows scored</div><div class="value" id="kFlows">—</div><div class="note" id="kSources"></div></div>
+        <div class="card kpi bad"><div class="label">Malicious flows</div><div class="value" id="kMal">—</div><div class="note" id="kMalPct"></div></div>
+        <div class="card kpi bad"><div class="label">Active threats (15 min)</div><div class="value" id="kThreats">—</div><div class="note">distinct sources</div></div>
+        <div class="card kpi"><div class="label">Flow bursts</div><div class="value" id="kBursts">—</div><div class="note">scan detector</div></div>
+        <div class="card kpi good"><div class="label">Active decoys</div><div class="value" id="kDecoys">—</div><div class="note" id="kInteractions"></div></div>
+      </div>
+      <div class="grid g-2 mt">
+        <div class="card"><h2>Flows by predicted class</h2><p class="hint">Benign vs. each attack family.</p><div id="chClass" class="chart"></div></div>
+        <div class="card"><h2>Flows per minute</h2><p class="hint">Benign and malicious over time.</p><div id="chTime" class="chart"></div></div>
+      </div>
+      <div class="card mt"><h2>Recent flow bursts</h2><p class="hint">One source opening many flows to one service in a window — how reconnaissance is caught.</p>
+        <div class="tablewrap"><table id="tBursts"><thead></thead><tbody></tbody></table></div></div>
+    </section>
+
+    <section id="v-traffic" class="hidden">
+      <div class="grid g-3" data-podstrip></div>
+      <div class="mt" data-run></div>
+      <div class="grid g-2 mt">
+        <div class="card"><div class="row between"><div><h2>Capture service</h2><p class="hint" id="capHint" style="margin:0">tcpdump on the pod bridge → CICFlowMeter → model.</p></div>
+          <div class="row"><button class="btn primary" id="btnCapStart">Start</button><button class="btn" id="btnCapStop">Stop</button>
+          <button class="btn" id="btnProcess" title="Convert and score any PCAP that has not been processed">Process pending</button></div></div>
+          <div id="capState" class="mt"></div></div>
+        <div class="card"><h2>Readiness</h2><p class="hint">Everything the traffic → detection path depends on.</p><div id="readiness"></div></div>
+      </div>
+      <div class="card mt">
+        <div class="row between"><h2>Detections</h2>
+          <div class="row"><select id="fClass"><option value="">All classes</option></select>
+            <label class="row" style="gap:5px"><input type="checkbox" id="fMal"> malicious only</label></div></div>
+        <div class="tablewrap mt"><table id="tDet"><thead></thead><tbody></tbody></table></div>
+      </div>
+    </section>
+
+    <section id="v-lab" class="hidden">
+      <div class="grid g-3" data-podstrip></div>
+      <div class="mt" data-run></div>
+      <div class="banner mt">Each scenario runs as one bounded Job in <code>ids-traffic</code> against the lab's own services. The attack scenarios map to classes the model detects.</div>
+      <div class="grid g-3" id="scenarioGrid"></div>
+      <div class="card mt"><h2>Running &amp; recent jobs</h2><div class="tablewrap"><table id="tJobs"><thead></thead><tbody></tbody></table></div></div>
+    </section>
+
+    <section id="v-deception" class="hidden">
+      <div class="card">
+        <div class="row between"><div><h2>MAPE-K deception controller</h2>
+          <p class="hint">Confident attack detections and flow bursts trigger isolated decoys. Benign traffic never does.</p></div>
+          <div class="row"><span class="pill" id="decEnabled">—</span><button class="btn primary" id="btnDecEnable">Enable</button>
+            <button class="btn" id="btnDecDisable">Disable</button><button class="btn" id="btnDecCycle">Run one cycle</button></div></div>
+        <div class="stage" id="stageRow"></div><div class="muted" id="decState"></div>
+      </div>
+      <div class="grid g-2 mt">
+        <div class="card"><h2>Active decoys</h2><p class="hint">Deployed in <code>ids-deception</code>.</p><div class="tablewrap"><table id="tDecoys"><thead></thead><tbody></tbody></table></div></div>
+        <div class="card"><h2>Manual controls &amp; test event</h2>
+          <div class="row mt"><label class="fld">Deploy decoy profile <select id="decProfile"></select></label><button class="btn" id="btnDeploy" style="align-self:flex-end">Deploy</button></div>
+          <div class="row mt"><label class="fld">Simulated attack class <select id="simClass"></select></label><button class="btn" id="btnSim" style="align-self:flex-end">Queue simulated event</button></div>
+          <p class="hint mt">Simulated events are stored separately and never counted as ML detections.</p></div>
+      </div>
+      <div class="card mt"><h2>Decision history</h2><p class="hint">Every decision with trigger, action and reason.</p><div class="tablewrap"><table id="tDecisions"><thead></thead><tbody></tbody></table></div></div>
+    </section>
+
+    <section id="v-cluster" class="hidden"><div id="clusterBody"></div></section>
+  </div>
+  <div class="content flush hidden" id="v-scorer"><iframe id="scorer" title="CSV scorer" loading="lazy"></iframe></div>
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+const $ = s => document.querySelector(s), $$ = s => [...document.querySelectorAll(s)];
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+const CLASS_VAR = {BENIGN:'--c-benign', DoS:'--c-dos', DDoS:'--c-ddos', PortScan:'--c-portscan', BruteForce:'--c-bruteforce', WebAttack:'--c-webattack', Bot:'--c-bot'};
+const ORDER = ['BENIGN','DoS','DDoS','PortScan','BruteForce','WebAttack','Bot'];
+const colorOf = c => css(CLASS_VAR[c] || '--muted');
+const fmt = n => (n ?? 0).toLocaleString();
+const esc = s => String(s ?? '').replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const TITLES = {overview:['Overview','Detection summary across live capture and replayed data'],
+  traffic:['Live traffic monitoring','Generate traffic, watch it captured, scored and detected'],
+  lab:['Traffic generator','Launch bounded attack and benign scenarios inside the cluster'],
+  deception:['Deception','MAPE-K controller and decoys'], cluster:['Cluster & pods','Target apps and lab namespaces'],
+  scorer:['CSV scorer & model','Score a CICFlowMeter CSV offline and inspect model performance']};
+let CUR = 'overview', LIVE = true, SCN = {}, RUNID = null, PRE = null, TGT = null;
+
+async function api(path, opts) {
+  const r = await fetch(path, opts);
+  if (!r.ok) { let m = r.statusText; try { const j = await r.json(); m = j.detail || m; } catch (e) {} throw new Error(m); }
+  return r.status === 204 ? null : r.json();
+}
+const post = (p, body) => api(p, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})});
+function toast(msg, ms = 3200) { const t = $('#toast'); t.textContent = msg; t.classList.add('show'); clearTimeout(toast.t); toast.t = setTimeout(() => t.classList.remove('show'), ms); }
+
+/* theme */
+function setTheme(t) { document.documentElement.dataset.theme = t; try { localStorage.setItem('ids-theme', t); } catch (e) {}
+  try { $('#scorer').contentDocument.documentElement.dataset.theme = t; } catch (e) {} }
+$('#themeBtn').onclick = () => { const dark = document.documentElement.dataset.theme ? document.documentElement.dataset.theme === 'dark' : matchMedia('(prefers-color-scheme: dark)').matches; setTheme(dark ? 'light' : 'dark'); render(); };
+try { const t = localStorage.getItem('ids-theme'); if (t) document.documentElement.dataset.theme = t; } catch (e) {}
+function baseLayout(extra = {}) { return Object.assign({paper_bgcolor: 'rgba(0,0,0,0)', plot_bgcolor: 'rgba(0,0,0,0)',
+  font: {family: 'system-ui, sans-serif', size: 12, color: css('--text-2')}, margin: {l: 48, r: 12, t: 8, b: 36}, showlegend: false, bargap: .25,
+  xaxis: {gridcolor: css('--grid'), zeroline: false, linecolor: css('--border')}, yaxis: {gridcolor: css('--grid'), zeroline: false, linecolor: css('--border')},
+  hoverlabel: {bgcolor: css('--surface'), bordercolor: css('--border'), font: {color: css('--text')}}}, extra); }
+const PCFG = {displayModeBar: false, responsive: true};
+
+/* navigation */
+function go(view) {
+  CUR = view;
+  $$('#nav button').forEach(b => b.classList.toggle('on', b.dataset.view === view));
+  $$('.content > section').forEach(s => s.classList.toggle('hidden', s.id !== 'v-' + view));
+  $('#content').classList.toggle('hidden', view === 'scorer');
+  $('#v-scorer').classList.toggle('hidden', view !== 'scorer');
+  if (view === 'scorer' && !$('#scorer').src) { $('#scorer').src = '/scorer?embed=1'; $('#scorer').onload = () => { try { const t = document.documentElement.dataset.theme; if (t) $('#scorer').contentDocument.documentElement.dataset.theme = t; } catch (e) {} }; }
+  $('#title').textContent = TITLES[view][0]; $('#subtitle').textContent = TITLES[view][1];
+  try { history.replaceState(null, '', '#' + view); } catch (e) {}
+  mountShared(); render();
+}
+$$('#nav button').forEach(b => b.onclick = () => go(b.dataset.view));
+
+/* ---------- shared: target pods strip + run panel ---------- */
+const APP_COLORS = {nodered: '#c0392b', grafana: '#f2711c', influxdb: '#6a5acd'};
+const APP_NAMES = {nodered: 'Node-RED', grafana: 'Grafana', influxdb: 'InfluxDB'};
+function podStripHTML() {
+  if (!TGT) return '<div class="card muted">Checking target pods…</div>';
+  return TGT.apps.map(a => {
+    const up = a.state === 'running', unk = a.state === 'cluster unreachable' || a.state === 'unknown';
+    const pod = a.pods[0]; const label = unk ? 'unknown' : (up ? 'Running' : a.state);
+    return `<div class="card app ${up ? 'up' : (unk ? '' : 'down')}">
+      <div class="ico" style="background:${APP_COLORS[a.key] || 'var(--accent)'}">${esc((APP_NAMES[a.key] || a.key)[0])}</div>
+      <div class="meta"><b>${esc(APP_NAMES[a.key] || a.key)}</b><small>${pod ? esc(pod.name) : 'no pod'} · :${a.port}</small></div>
+      <div class="st"><span class="pill ${up ? 'ok' : (unk ? 'warn' : 'bad')}">${esc(label)}</span>
+        ${pod && pod.restarts ? `<div class="muted" style="font-size:11px">${pod.restarts} restarts</div>` : ''}</div></div>`;
+  }).join('') + (TGT && !TGT.connected ? `<div class="banner bad" style="grid-column:1/-1;margin:0">Can't read the cluster, so pod status is unknown: ${esc(TGT.error || '')}</div>` : '');
+}
+function mountShared() {
+  $$('[data-run]').forEach(h => { if (h.dataset.mounted) return; h.appendChild($('#tplRun').content.cloneNode(true)); h.dataset.mounted = '1'; wireRun(h); });
+  paintShared();
+}
+function wireRun(root) {
+  const sel = root.querySelector('.runScn');
+  const fill = () => { if (!Object.keys(SCN).length) return; sel.innerHTML = Object.entries(SCN).map(([k, s]) =>
+    `<option value="${k}">${k.replace(/_/g, ' ')}${s.detectable ? ' → ' + s.expect_class : ''}</option>`).join(''); describe(); };
+  const describe = () => { const s = SCN[sel.value]; root.querySelector('.runDesc').textContent = s ? s.description : ''; };
+  sel.onchange = describe; root._fill = fill; fill();
+  root.querySelector('.runGo').onclick = async ev => {
+    const b = ev.currentTarget; b.disabled = true;
+    try {
+      const r = await post('/api/pipeline/run', {scenario: sel.value, count: +root.querySelector('.runCount').value,
+        delay: +root.querySelector('.runDelay').value, auto_capture: root.querySelector('.runAuto').checked});
+      RUNID = r.id; toast(`Started ${r.scenario} → Job ${r.job}. ${r.notes.join('; ')}`, 5000);
+    } catch (e) { toast('Could not generate traffic: ' + e.message, 7000); }
+    b.disabled = false; refreshAll();
+  };
+}
+async function paintShared() {
+  $$('[data-podstrip]').forEach(el => el.innerHTML = podStripHTML());
+  $$('[data-run]').forEach(h => { if (h._fill && !h.querySelector('.runScn').options.length) h._fill(); });
+  const ready = PRE && PRE.can_generate;
+  $$('.runGo').forEach(b => b.title = ready ? '' : 'Cluster or traffic lab not ready — see Readiness');
+  $$('#runReady').forEach(p => { p.textContent = !PRE ? 'checking…' : (ready ? 'ready' : 'not ready'); p.className = 'pill ' + (!PRE ? '' : ready ? 'ok' : 'bad'); });
+  let st = null; try { st = await api('/api/pipeline/status' + (RUNID ? '?run_id=' + encodeURIComponent(RUNID) : '')); } catch (e) {}
+  $$('.runSteps').forEach(box => {
+    if (!st || !st.run) { box.innerHTML = ['Traffic generated', 'Packets captured', 'Flows scored', 'Detections'].map((l, i) => `<div class="step"><span class="num">${i + 1}</span><b>${l}</b><small>waiting for a run</small></div>`).join(''); return; }
+    box.innerHTML = st.stages.map((s, i) => `<div class="step ${s.state}"><span class="num">${s.state === 'done' ? '✓' : i + 1}</span><b>${s.label}</b><small>${esc(s.detail)}</small></div>`).join('');
+  });
+  $$('.runInfo').forEach(el => {
+    if (!st || !st.run) { el.textContent = ''; return; }
+    const cls = Object.entries(st.by_class).map(([c, n]) => `<span class="badge"><span class="sq" style="background:${colorOf(c)}"></span>${c} ${fmt(n)}</span>`).join(' ');
+    el.innerHTML = `<b>${esc(st.run.scenario)}</b> (job <code>${esc(st.run.job)}</code>, ${esc((st.run.started_at || '').slice(11, 19))} UTC) — ${esc(st.hint)} ${cls}`;
+  });
+}
+
+/* ---------- renderers ---------- */
+async function refreshStatus() {
+  try { const [t, p] = await Promise.all([api('/api/targets'), api('/api/pipeline/preflight')]); TGT = t; PRE = p; } catch (e) {}
+  if (!TGT) return;
+  const c = (id, cls, text) => { const el = $(id); el.querySelector('.dot').className = 'dot ' + cls; el.querySelector('b').textContent = text; };
+  c('#chipCluster', TGT.connected ? 'ok' : 'bad', TGT.connected ? 'connected' : 'unreachable');
+  $('#chipCluster').title = TGT.connected ? ('identity: ' + TGT.identity) : (TGT.error || '');
+  c('#chipPods', TGT.all_running ? 'ok' : (TGT.running ? 'warn' : 'bad'), `${TGT.running}/${TGT.total} running`);
+  $('#sidePods').innerHTML = TGT.apps.map(a => `<div><span class="dot ${a.state === 'running' ? 'ok' : (a.state === 'cluster unreachable' ? '' : 'bad')}"></span>${esc(APP_NAMES[a.key] || a.key)}<span style="margin-left:auto;color:#6b7390">${a.state === 'running' ? 'up' : (a.state === 'cluster unreachable' ? '?' : esc(a.state))}</span></div>`).join('');
+}
+async function render() {
+  try {
+    await Promise.all([refreshStatus(), refreshChips()]);
+    paintShared();
+    if (CUR === 'overview') await renderOverview();
+    else if (CUR === 'traffic') await renderTraffic();
+    else if (CUR === 'lab') await renderLab();
+    else if (CUR === 'deception') await renderDeception();
+    else if (CUR === 'cluster') await renderCluster();
+  } catch (e) { console.error(e); }
+}
+const refreshAll = render;
+async function refreshChips() {
+  try {
+    const cap = await api('/api/live/capture/status'); window.CAP = cap;
+    const s = cap.service, sup = cap.support;
+    const el = $('#chipCap');
+    el.querySelector('.dot').className = 'dot ' + (s.running ? 'ok' : (sup.supported ? '' : 'bad'));
+    el.querySelector('b').textContent = s.running ? 'running' : (sup.supported ? 'stopped' : 'unavailable');
+    el.title = sup.supported ? '' : sup.reason;
+    const d = await api('/api/deception/status'); window.DEC = d;
+    $('#chipDec .dot').className = 'dot ' + (d.enabled ? 'ok' : '');
+    $('#chipDec b').textContent = d.enabled ? 'enabled' : 'off';
+    const m = await api('/api/live/metrics'); const n = $('#navThreat');
+    n.textContent = m.active_threats; n.classList.toggle('hidden', !m.active_threats);
+  } catch (e) {}
+}
+
+async function renderOverview() {
+  const m = await api('/api/live/metrics');
+  $('#kFlows').textContent = fmt(m.total_flows);
+  $('#kSources').textContent = Object.entries(m.flows_by_source).map(([k, v]) => `${k} ${fmt(v)}`).join(' · ');
+  $('#kMal').textContent = fmt(m.malicious_flows);
+  $('#kMalPct').textContent = m.total_flows ? ((m.malicious_flows / m.total_flows) * 100).toFixed(2) + '% of flows' : '';
+  $('#kThreats').textContent = fmt(m.active_threats); $('#kBursts').textContent = fmt(m.flow_bursts);
+  $('#kDecoys').textContent = fmt(m.active_decoys); $('#kInteractions').textContent = `${fmt(m.total_interactions)} interactions`;
+  const cls = ORDER.filter(c => m.flows_by_class[c]).reverse();
+  Plotly.react('chClass', [{type: 'bar', orientation: 'h', y: cls, x: cls.map(c => m.flows_by_class[c]), marker: {color: cls.map(colorOf)},
+    text: cls.map(c => fmt(m.flows_by_class[c])), textposition: 'outside', cliponaxis: false, textfont: {color: css('--text-2')},
+    hovertemplate: '%{y}: %{x:,}<extra></extra>'}], baseLayout({margin: {l: 88, r: 56, t: 6, b: 30}}), PCFG);
+  const tl = (await api('/api/live/stats')).timeline || [];
+  Plotly.react('chTime', [{type: 'bar', x: tl.map(r => r.minute), y: tl.map(r => r.benign), marker: {color: colorOf('BENIGN')}},
+    {type: 'bar', x: tl.map(r => r.minute), y: tl.map(r => r.malicious), marker: {color: css('--critical')}}],
+    baseLayout({barmode: 'stack', margin: {l: 48, r: 12, t: 6, b: 50}}), PCFG);
+  const bursts = await api('/api/live/bursts?limit=50');
+  table('#tBursts', ['Time', 'Source', 'Dest', 'Port', 'Flows', 'Rate/s'], bursts.map(b => [(b.detected_at || '').slice(11, 19), b.src_ip, b.dst_ip, b.dst_port, fmt(b.flows), b.rate_per_s]));
+}
+
+async function renderTraffic() {
+  const cap = window.CAP; if (!cap) return;
+  const s = cap.service, sup = cap.support;
+  $('#capState').innerHTML = !sup.supported
+    ? `<div class="banner bad" style="margin:0"><b>Capture can't run on this machine.</b> ${esc(sup.reason)}</div>`
+    : `<span class="pill ${s.running ? 'ok' : ''}">${s.running ? 'running' : esc(s.status || 'stopped')}</span> interface <code>${esc(s.interface || '—')}</code> · ${cap.pending.length} PCAP(s) pending · ${(cap.recent || []).length} recent windows` +
+      (s.last_window ? ` · last window ${fmt(s.last_window.packets)} packets` : '');
+  $('#btnCapStart').disabled = s.running || !sup.supported; $('#btnCapStop').disabled = !s.running; $('#btnProcess').disabled = !sup.supported && !cap.pending.length;
+  if (PRE) $('#readiness').innerHTML = PRE.steps.map(st => `<div class="check"><span class="mark ${st.ok ? 'ok' : 'no'}">${st.ok ? '✓' : '✕'}</span>
+    <div><b>${esc(st.label)}</b>${st.detail ? `<div class="muted" style="font-size:12px">${esc(st.detail)}</div>` : ''}${!st.ok && st.fix ? `<pre class="fix">${esc(st.fix)}</pre>` : ''}</div></div>`).join('');
+  const sel = $('#fClass'); if (sel.options.length <= 1) ORDER.forEach(c => sel.add(new Option(c, c)));
+  const q = new URLSearchParams(); if (sel.value) q.set('predicted_class', sel.value); if ($('#fMal').checked) q.set('malicious', 'true'); q.set('limit', '300');
+  const det = await api('/api/live/detections?' + q);
+  table('#tDet', ['Time', 'Source', 'Dest', 'Port', 'Class', 'Conf', 'Origin'], det.map(d => [(d.detected_at || '').slice(11, 19), d.src_ip ?? '', d.dst_ip ?? '', d.dst_port ?? '', classBadge(d.predicted_class), pct(d.confidence), d.source]));
+}
+$('#fClass').onchange = $('#fMal').onchange = () => renderTraffic();
+$('#btnCapStart').onclick = async () => { try { await post('/api/live/capture/start'); toast('Capture started'); } catch (e) { toast(e.message, 6000); } render(); };
+$('#btnCapStop').onclick = async () => { try { await post('/api/live/capture/stop'); toast('Capture stopped'); } catch (e) { toast(e.message, 6000); } render(); };
+$('#btnProcess').onclick = async () => { try { const r = await post('/api/live/process'); toast(`Processed ${(r.processed || []).length} PCAP(s)`); } catch (e) { toast(e.message, 6000); } render(); };
+
+async function renderLab() {
+  const grid = $('#scenarioGrid');
+  if (!grid.dataset.built && Object.keys(SCN).length) {
+    grid.innerHTML = Object.entries(SCN).map(([name, s]) => `<div class="scenario"><h3>${name.replace(/_/g, ' ')} ${s.detectable ? `<span class="pill warn">${s.expect_class}</span>` : '<span class="pill">benign-like</span>'}</h3>
+      <p>${esc(s.description)}</p><button class="btn primary sm" data-scn="${name}">▶ Run with auto-capture</button></div>`).join('');
+    grid.dataset.built = '1';
+    grid.querySelectorAll('button[data-scn]').forEach(b => b.onclick = async () => {
+      b.disabled = true;
+      try { const r = await post('/api/pipeline/run', {scenario: b.dataset.scn, count: 300}); RUNID = r.id; toast(`Started ${r.scenario} → Job ${r.job}. ${r.notes.join('; ')}`, 5000); }
+      catch (e) { toast('Could not generate traffic: ' + e.message, 7000); }
+      b.disabled = false; render();
+    });
+  }
+  const jobs = await api('/api/trafficlab/jobs');
+  if (jobs[0] && jobs[0].error) { table('#tJobs', ['Status'], [[esc(jobs[0].error)]]); return; }
+  table('#tJobs', ['Job', 'Scenario', 'State', 'Started', ''], jobs.map(j => [j.name, j.scenario, statePill(j.state), (j.started || '').slice(11, 19), `<button class="btn danger sm" data-del="${j.name}">Delete</button>`]));
+  $('#tJobs').querySelectorAll('button[data-del]').forEach(b => b.onclick = async () => { try { await api('/api/trafficlab/jobs/' + b.dataset.del, {method: 'DELETE'}); toast('Deleted ' + b.dataset.del); } catch (e) { toast(e.message); } render(); });
+}
+
+async function renderDeception() {
+  const st = window.DEC || await api('/api/deception/status');
+  $('#decEnabled').textContent = st.enabled ? 'enabled' : 'disabled'; $('#decEnabled').className = 'pill ' + (st.enabled ? 'ok' : '');
+  $('#btnDecEnable').disabled = st.enabled; $('#btnDecDisable').disabled = !st.enabled;
+  $('#stageRow').innerHTML = ['monitor', 'analyze', 'plan', 'execute', 'knowledge'].map(s => `<span class="${s === st.stage ? 'on' : ''}">${s}</span>`).join('');
+  $('#decState').innerHTML = st.kubernetes_available ? 'Kubernetes connected' : `<span class="pill bad">Kubernetes unavailable</span> ${esc(st.kubernetes_error || '')} — decisions are recorded; decoys deploy once the cluster is reachable`;
+  const pol = await api('/api/deception/policy'); const prof = $('#decProfile'), sim = $('#simClass');
+  if (!prof.options.length) Object.keys(pol.profiles).forEach(p => prof.add(new Option(p, p)));
+  if (!sim.options.length) Object.keys(pol.attack_policy).forEach(c => sim.add(new Option(c, c)));
+  const decoys = (await api('/api/deception/decoys?limit=50')).filter(d => ['deploying', 'active'].includes(d.status));
+  table('#tDecoys', ['Name', 'Profile', 'Status', 'Replicas', ''], decoys.map(d => [d.name, d.profile, statePill(d.status), d.replicas, `<button class="btn danger sm" data-rm="${d.name}">Remove</button>`]));
+  $('#tDecoys').querySelectorAll('button[data-rm]').forEach(b => b.onclick = async () => { try { await api('/api/deception/decoys/' + b.dataset.rm, {method: 'DELETE'}); toast('Removed ' + b.dataset.rm); } catch (e) { toast(e.message); } render(); });
+  const dec = await api('/api/deception/decisions?limit=60');
+  table('#tDecisions', ['Time', 'Trigger', 'Class', 'Action', 'Profile', 'Result', 'Reason'], dec.map(d => [(d.created_at || '').slice(11, 19), d.trigger, d.attack_class ?? '', d.action, d.decoy_profile ?? '', statePill(d.result), `<span class="muted" title="${esc(d.reason)}">${esc((d.reason || '').slice(0, 70))}</span>`]));
+}
+$('#btnDecEnable').onclick = async () => { await post('/api/deception/enable'); toast('Deception enabled'); render(); };
+$('#btnDecDisable').onclick = async () => { await post('/api/deception/disable'); toast('Deception disabled'); render(); };
+$('#btnDecCycle').onclick = async () => { const r = await post('/api/deception/cycle'); toast(`Cycle ${r.cycle_id}: ${(r.actions || []).length} action(s)`); render(); };
+$('#btnDeploy').onclick = async () => { try { const r = await post('/api/deception/decoys', {profile: $('#decProfile').value}); toast('Deployed ' + r.name); } catch (e) { toast(e.message, 6000); } render(); };
+$('#btnSim').onclick = async () => { try { await post('/api/deception/test-event', {attack_class: $('#simClass').value}); toast('Queued simulated ' + $('#simClass').value); } catch (e) { toast(e.message); } render(); };
+
+async function renderCluster() {
+  let s; try { s = await api('/api/kubernetes/status'); } catch (e) { $('#clusterBody').innerHTML = `<div class="banner bad">${esc(e.message)}</div>`; return; }
+  if (!s.connected) { $('#clusterBody').innerHTML = `<div class="banner bad"><b>Cluster not connected.</b> ${esc(s.error || '')}<pre class="fix">Run the dashboard inside WSL2 / on the K3s host, or copy the K3s kubeconfig:\nsudo cat /etc/rancher/k3s/k3s.yaml &gt; ~/.kube/config</pre></div>`; return; }
+  let html = `<div class="banner good">Connected as <b>${esc(s.identity)}</b>${s.identity !== 'ids-controller' ? ' (full-access kubeconfig; run deploy/rbac/create-kubeconfig.sh for the least-privilege identity)' : ''}</div>`;
+  html += `<div class="grid g-3">${podStripHTML()}</div>`;
+  html += `<div class="card mt"><h2>Nodes</h2><div class="tablewrap"><table><thead><tr><th>Name</th><th>Ready</th><th>Version</th><th>IP</th></tr></thead><tbody>` +
+    s.nodes.map(n => `<tr><td>${esc(n.name)}</td><td>${esc(n.ready)}</td><td>${esc(n.version)}</td><td>${esc(n.internal_ip || '')}</td></tr>`).join('') + `</tbody></table></div></div>`;
+  for (const [ns, e] of Object.entries(s.namespaces)) {
+    html += `<div class="card mt"><h2>${ns}</h2>` + (e.error ? `<p class="muted">${esc(e.error)}</p>` :
+      `<div class="tablewrap"><table><thead><tr><th>Pod</th><th>Phase</th><th>Ready</th><th>Restarts</th></tr></thead><tbody>` +
+      ((e.pods || []).map(p => `<tr><td>${esc(p.name)}</td><td>${esc(p.phase)}</td><td>${p.ready ? '✓' : '—'}</td><td>${p.restarts}</td></tr>`).join('') || '<tr><td colspan="4" class="muted">no pods</td></tr>') + `</tbody></table></div>`) + `</div>`;
+  }
+  $('#clusterBody').innerHTML = html;
+}
+
+/* ---------- helpers ---------- */
+function table(sel, cols, rows) {
+  $(sel + ' thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
+  $(sel + ' tbody').innerHTML = rows.length ? rows.map(r => '<tr>' + r.map(c => `<td>${c ?? ''}</td>`).join('') + '</tr>').join('')
+    : `<tr><td colspan="${cols.length}" class="muted" style="text-align:center;padding:20px">No data yet</td></tr>`;
+}
+const pct = x => x == null ? '' : (x * 100).toFixed(1) + '%';
+const classBadge = c => `<span class="badge"><span class="sq" style="background:${colorOf(c)}"></span>${esc(c)}</span>`;
+const statePill = s => { const k = {running: 'ok', active: 'ok', succeeded: 'ok', ok: 'ok', deploying: 'warn', pending: 'warn', planned: 'warn', failed: 'bad', suppress_limit: 'warn'}[s] || ''; return `<span class="pill ${k}">${esc(s)}</span>`; };
+
+async function boot() {
+  let feat; try { feat = await api('/api/features'); } catch (e) { feat = {live: false}; }
+  LIVE = feat.live; $('#noLive').classList.toggle('hidden', LIVE);
+  try { SCN = await api('/api/trafficlab/scenarios'); } catch (e) {}
+  const v = (location.hash || '#overview').slice(1);
+  go(TITLES[v] ? v : 'overview');
+  setInterval(() => { if (!document.hidden && CUR !== 'scorer' && LIVE) render(); }, 4000);
+}
+boot();
+</script>
+</body>
+</html>

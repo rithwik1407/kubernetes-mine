@@ -24,15 +24,35 @@ def scenarios(cfg: dict[str, Any] | None = None) -> dict[str, dict[str, Any]]:
 
 
 def _api(cfg: dict[str, Any]):
+    from live.kube import KubeUnavailable, api_client
     try:
-        from kubernetes import client, config as kconfig
-    except ImportError as e:  # pragma: no cover
-        raise TrafficLabError(f"kubernetes client not installed: {e}")
-    kubeconfig = repo_path(cfg["deception"]["kubeconfig"])
-    if not kubeconfig.is_file():
-        raise TrafficLabError(f"kubeconfig {kubeconfig} missing; run deploy/rbac/create-kubeconfig.sh")
-    api = kconfig.new_client_from_config(config_file=str(kubeconfig))
+        from kubernetes import client
+        api, identity = api_client(cfg)
+    except (ImportError, KubeUnavailable) as e:
+        raise TrafficLabError(str(e))
     return client, client.BatchV1Api(api), client.CoreV1Api(api)
+
+
+def check_ready(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Is the traffic lab deployed (namespace + generator script)? Never raises."""
+    cfg = cfg or load_config()
+    ns = cfg["traffic_lab"]["namespace"]
+    try:
+        client, _, core = _api(cfg)
+    except TrafficLabError as e:
+        return {"ready": False, "reason": str(e)}
+    try:
+        core.read_namespaced_config_map("traffic-generator-script", ns, _request_timeout=5)
+    except client.exceptions.ApiException as e:
+        if e.status == 404:
+            return {"ready": False, "reason": f"traffic lab not deployed in namespace {ns}",
+                    "fix": "kubectl apply -f deploy/namespaces/ && kubectl apply -k deploy/traffic-lab"}
+        if e.status == 403:
+            return {"ready": False, "reason": "kubeconfig is not allowed to read the traffic lab (RBAC)"}
+        return {"ready": False, "reason": f"Kubernetes API error {e.status}"}
+    except Exception as e:
+        return {"ready": False, "reason": f"cluster unreachable: {str(e)[:160]}"}
+    return {"ready": True}
 
 
 def _target_for(scenario: str, cfg: dict[str, Any]) -> str:
@@ -88,8 +108,14 @@ def launch(scenario: str, target: str | None = None, count: int = 300, delay: fl
            cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     body = build_job(scenario, cfg, target, count, delay)
-    _, batch, _ = _api(cfg)
-    created = batch.create_namespaced_job(cfg["traffic_lab"]["namespace"], body)
+    client, batch, _ = _api(cfg)
+    ready = check_ready(cfg)
+    if not ready["ready"]:
+        raise TrafficLabError(ready["reason"] + (f" — run: {ready['fix']}" if ready.get("fix") else ""))
+    try:
+        created = batch.create_namespaced_job(cfg["traffic_lab"]["namespace"], body)
+    except client.exceptions.ApiException as e:
+        raise TrafficLabError(f"Kubernetes refused the Job ({e.status}): {(e.reason or '')[:120]}")
     return {"job": created.metadata.name, "scenario": scenario,
             "mode": body["spec"]["template"]["metadata"]["labels"]["scenario"],
             "target": body["spec"]["template"]["spec"]["containers"][0]["env"][1]["value"]}

@@ -11,9 +11,10 @@ LAB_NAMESPACES = ("target-apps", "ids-traffic", "ids-deception")
 def cluster_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     try:
-        from kubernetes import client, config as kconfig
+        from kubernetes import client
 
-        api = kconfig.new_client_from_config(config_file=str(project_path(cfg["deception"]["kubeconfig"])))
+        from live.kube import api_client
+        api, identity = api_client(cfg)
         core, apps = client.CoreV1Api(api), client.AppsV1Api(api)
         nodes = [{
             "name": n.metadata.name,
@@ -24,7 +25,7 @@ def cluster_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     except Exception as e:
         return {"connected": False, "error": str(e)[:300]}
 
-    out: dict[str, Any] = {"connected": True, "nodes": nodes, "namespaces": {}}
+    out: dict[str, Any] = {"connected": True, "identity": identity, "nodes": nodes, "namespaces": {}}
     for ns in LAB_NAMESPACES:
         entry: dict[str, Any] = {}
         try:
@@ -53,4 +54,55 @@ def cluster_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         except Exception as e:
             entry["error"] = str(e)[:300]
         out["namespaces"][ns] = entry
+    return out
+
+
+
+def _pod_state(p) -> str:
+    if p.metadata.deletion_timestamp:
+        return "terminating"
+    for cs in p.status.container_statuses or []:
+        w = cs.state.waiting if cs.state else None
+        if w and w.reason:
+            return w.reason            # CrashLoopBackOff, ImagePullBackOff, ...
+    if p.status.phase == "Running" and all(cs.ready for cs in (p.status.container_statuses or [])):
+        return "running"
+    return (p.status.phase or "unknown").lower() if p.status.phase != "Running" else "not ready"
+
+
+def targets_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Are the target apps (Node-RED, Grafana, InfluxDB) running? Never raises."""
+    cfg = cfg or load_config()
+    targets = cfg["traffic_lab"]["targets"]
+    apps = [{"key": k, "port": t["port"], "host": t["host"], "state": "unknown", "pods": [], "service": None}
+            for k, t in targets.items()]
+    out: dict[str, Any] = {"connected": False, "namespace": "target-apps", "apps": apps,
+                           "running": 0, "total": len(apps), "all_running": False}
+    try:
+        from live.kube import api_client
+        from kubernetes import client
+        api, identity = api_client(cfg)
+        core = client.CoreV1Api(api)
+        pods = core.list_namespaced_pod("target-apps", _request_timeout=6).items
+        try:
+            svcs = {s.metadata.name for s in core.list_namespaced_service("target-apps", _request_timeout=6).items}
+        except Exception:
+            svcs = set()
+    except Exception as e:
+        out["error"] = str(e)[:300]
+        for a in apps:
+            a["state"] = "cluster unreachable"
+        return out
+    out["connected"], out["identity"] = True, identity
+    for a in apps:
+        key = a["key"].lower()
+        match = [p for p in pods if key in p.metadata.name.lower()
+                 or any(key in str(v).lower() for v in (p.metadata.labels or {}).values())]
+        a["pods"] = [{"name": p.metadata.name, "state": _pod_state(p), "ip": p.status.pod_ip,
+                      "restarts": sum(cs.restart_count for cs in (p.status.container_statuses or []))} for p in match]
+        a["service"] = any(key in s for s in svcs) if svcs else None
+        states = [x["state"] for x in a["pods"]]
+        a["state"] = ("running" if "running" in states else (states[0] if states else "not found"))
+    out["running"] = sum(a["state"] == "running" for a in apps)
+    out["all_running"] = out["running"] == out["total"]
     return out

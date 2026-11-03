@@ -58,14 +58,16 @@ def features():
 
 
 @app.get("/")
-def index():
-    return FileResponse(HERE / "static" / "index.html")
-
-
 @app.get("/live")
-def live_page():
-    """The live SOC dashboard (capture, traffic lab, deception, cluster)."""
-    return FileResponse(HERE / "static" / "live.html")
+def index():
+    """The unified dashboard: sidebar with live monitoring, traffic generator, deception, cluster, CSV scorer."""
+    return FileResponse(HERE / "static" / "app.html")
+
+
+@app.get("/scorer")
+def scorer_page():
+    """The CSV scorer on its own (also embedded in the unified dashboard)."""
+    return FileResponse(HERE / "static" / "index.html")
 
 
 @app.get("/api/metrics")

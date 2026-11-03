@@ -10,10 +10,11 @@ the attack traffic to test detection.
 
 ## Two ways to use it
 
-1. **CSV scorer** (`/`) — drop a CICFlowMeter CSV and see per-flow predictions,
-   confidence, charts and model performance. No cluster needed.
-2. **Live SOC** (`/live`) — live capture, the traffic lab, the deception
-   controller and cluster status. Needs a K3s cluster and CICFlowMeter.
+One dashboard (`/`) with a left sidebar: **Overview**, **Live traffic** (target-pod
+status, one-click *Generate & capture*, live detections), **Traffic generator**,
+**Deception**, **Cluster & pods** and the **CSV scorer & model** page. The live parts
+need a K3s cluster and CICFlowMeter and should be run in WSL2/Linux; the CSV scorer
+needs nothing but Python.
 
 ## Layout
 
@@ -24,8 +25,8 @@ models/
   cic-ids2017-lab/       + verified lab benign traffic (used by the live pipeline)
 dashboard/
   app.py                 FastAPI app: CSV scorer + live endpoints (live_api.py)
-  static/index.html      CSV scorer page
-  static/live.html       live SOC dashboard
+  static/app.html        unified dashboard (left sidebar)
+  static/index.html      CSV scorer page (embedded in the dashboard)
 live/                    live pipeline: capture, CICFlowMeter, scoring, flow bursts,
                          MAPE-K deception controller, traffic-lab launcher
 deploy/
@@ -49,9 +50,9 @@ pip install -r requirements.txt
 cd dashboard && uvicorn app:app --port 8000      # open http://localhost:8000
 ```
 
-The live SOC page is at `/live`. Running it against a real cluster needs a few
-one-time steps (tcpdump capability, CICFlowMeter, the RBAC identity, the lab
-manifests) — see **[docs/live-system.md](docs/live-system.md)**.
+For the live pipeline, run in WSL2/Linux: `bash scripts/setup_lab.sh` once, then
+`bash scripts/run_dashboard.sh`. Details (tcpdump capability, CICFlowMeter, RBAC
+identity, lab manifests) — see **[docs/live-system.md](docs/live-system.md)**.
 
 ## Models (held-out 30% CIC-IDS2017 test split, 659,502 flows)
 

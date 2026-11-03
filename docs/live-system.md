@@ -28,6 +28,35 @@ one in the friend's project.
 - Everything degrades gracefully: with no cluster the dashboard still shows stored
   records and reports "Kubernetes unavailable".
 
+## Where to run it (important on Windows)
+
+The capture step needs Linux: `tcpdump`, the K3s `cni0` bridge and `/sys/class/net`.
+The K3s lab from the friend's project runs in **WSL2 (Ubuntu)**, so run the dashboard
+there too:
+
+```bash
+# in the WSL2 Ubuntu terminal, in a clone of this repo (e.g. ~/kubernetes-mine)
+bash scripts/setup_lab.sh        # once: venv, tcpdump capability, manifests, kubeconfig
+bash scripts/run_dashboard.sh    # then open http://localhost:8000 in the Windows browser
+```
+
+Running on plain Windows still works for the CSV scorer and for viewing/launching
+(if `kubectl` can reach the cluster) but the dashboard shows **Capture unavailable**
+and explains why — nothing crashes. Use WSL for the full automatic pipeline.
+
+## What happens when you press *Generate & capture*
+
+1. The page checks the three target pods (Node-RED, Grafana, InfluxDB in `target-apps`)
+   and shows each as Running / CrashLoopBackOff / not found.
+2. Capture is started automatically if it is not already running.
+3. The scenario Job is launched in `ids-traffic`.
+4. Each closed capture window is converted by CICFlowMeter, scored by the model and
+   checked by the flow-burst detector without any extra clicks. The four-step tracker
+   on the page follows the run: traffic → packets → flows scored → detections.
+
+If no `config/ids-controller.kubeconfig` exists the dashboard falls back to the default
+kubeconfig (`$KUBECONFIG` or `~/.kube/config`) and shows which identity it uses.
+
 ## Prerequisites
 
 - A single-node K3s cluster, with `~/.kube/config` readable (`export KUBECONFIG=$HOME/.kube/config`).
@@ -116,7 +145,7 @@ traffic is ever redirected.
 ## Tests
 
 ```bash
-python -m pytest -q        # 15 tests; no cluster required
+python -m pytest -q        # 22 tests; no cluster required
 ```
 
 They cover the CSV schema quirks and feature aliasing, flow-burst detection, the

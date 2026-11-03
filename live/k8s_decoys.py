@@ -42,10 +42,11 @@ class DecoyManager:
         self.max_replicas = int(d["max_replicas"])
         self.template = project_path(d["template"]).read_text()
         if api_client is None:
-            kubeconfig = project_path(d["kubeconfig"])
-            if not kubeconfig.is_file():
-                raise DecoyError(f"{kubeconfig} missing; run deploy/rbac/create-kubeconfig.sh")
-            api_client = kconfig.new_client_from_config(config_file=str(kubeconfig))
+            from live.kube import KubeUnavailable, api_client as _api_client
+            try:
+                api_client, _ = _api_client(self.cfg)
+            except KubeUnavailable as e:
+                raise DecoyError(str(e))
         self.apps = client.AppsV1Api(api_client)
         self.core = client.CoreV1Api(api_client)
         self._api_exc = client.exceptions.ApiException

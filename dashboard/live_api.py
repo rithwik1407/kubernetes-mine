@@ -60,6 +60,10 @@ class LaunchRequest(BaseModel):
     delay: float = Field(0.1, ge=0.0, le=10.0)
 
 
+class RunRequest(LaunchRequest):
+    auto_capture: bool = True
+
+
 class TestEvent(BaseModel):
     attack_class: str
     confidence: float = Field(0.95, ge=0, le=1)
@@ -105,7 +109,7 @@ def live_captures(limit: int = Query(100, ge=1, le=2000)):
 def capture_status():
     from live import capture as cap
     from live.process_pcap import pending_pcaps
-    return {"service": cap.read_state(CFG), "recent": queries.captures(20, CFG),
+    return {"service": cap.read_state(CFG), "support": cap.support(CFG), "recent": queries.captures(20, CFG),
             "pending": [p.name for p in pending_pcaps(CFG)]}
 
 
@@ -123,7 +127,10 @@ def capture_start(req: CaptureStart):
 @router.post("/api/live/capture/stop")
 def capture_stop():
     from live import capture as cap
-    return cap.stop(CFG)
+    try:
+        return cap.stop(CFG)
+    except OSError as e:
+        raise HTTPException(409, f"could not stop capture: {e}")
 
 
 @router.post("/api/live/process")
@@ -147,6 +154,36 @@ def trafficlab_launch(req: LaunchRequest):
         return launch(req.scenario, req.target, req.count, req.delay, CFG)
     except TrafficLabError as e:
         raise HTTPException(503, str(e))
+
+
+@router.get("/api/targets")
+def targets():
+    """Are the Node-RED / Grafana / InfluxDB pods running?"""
+    from live.k8s_status import targets_status
+    return targets_status(CFG)
+
+
+@router.get("/api/pipeline/preflight")
+def pipeline_preflight():
+    from live import pipeline
+    return pipeline.preflight(CFG)
+
+
+@router.post("/api/pipeline/run")
+def pipeline_run(req: RunRequest):
+    """Generate traffic and make sure it is captured and processed automatically."""
+    from live import pipeline
+    from live.trafficlab import TrafficLabError
+    try:
+        return pipeline.run_scenario(req.scenario, req.target, req.count, req.delay, req.auto_capture, CFG)
+    except TrafficLabError as e:
+        raise HTTPException(503, str(e))
+
+
+@router.get("/api/pipeline/status")
+def pipeline_status(run_id: str | None = None):
+    from live import pipeline
+    return pipeline.run_status(run_id, CFG)
 
 
 @router.get("/api/trafficlab/jobs")
