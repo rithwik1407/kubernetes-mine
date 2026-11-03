@@ -1,10 +1,13 @@
+# Works on Python 3.11+. The saved model (models/cic-ids2017/best_model.joblib) is a
+# scikit-learn Random Forest trained with scikit-learn 1.9.1: keep that pin, or it may not load.
+scikit-learn==1.9.1
+numpy>=1.26,<3
+pandas>=2.2
+pyarrow
+lightgbm>=4.5
+xgboost>=2.1
+matplotlib
+joblib
 fastapi
 uvicorn
 python-multipart
-pandas
-numpy
-pyarrow
-scikit-learn
-joblib
-lightgbm
-xgboost
