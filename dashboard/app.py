@@ -48,6 +48,12 @@ try:
     LIVE_ENABLED = True
 except Exception as _live_err:  # noqa: BLE001
     LIVE_ENABLED = False
+    import traceback
+    print("\n" + "=" * 70 + "\nLIVE FEATURES DISABLED - every /api/live, /api/trafficlab, /api/pipeline,\n"
+          "/api/targets, /api/deception and /api/kubernetes route will return 404.\n"
+          f"Reason: {type(_live_err).__name__}: {_live_err}\n"
+          "Fix: pip install -r requirements.txt  (needs pyyaml and kubernetes)\n" + "=" * 70, file=sys.stderr)
+    traceback.print_exc()
     _LIVE_IMPORT_ERROR = str(_live_err)
 
 

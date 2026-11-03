@@ -47,8 +47,8 @@ def check_ready(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         if e.status == 404:
             return {"ready": False, "reason": f"traffic lab not deployed in namespace {ns}",
                     "fix": "kubectl apply -f deploy/namespaces/ && kubectl apply -k deploy/traffic-lab"}
-        if e.status == 403:
-            return {"ready": False, "reason": "kubeconfig is not allowed to read the traffic lab (RBAC)"}
+        if e.status == 403:  # older RBAC without configmap read: don't block, the Job create is the real test
+            return {"ready": True, "note": "could not verify generator script (RBAC); re-apply deploy/rbac/ids-controller.yaml"}
         return {"ready": False, "reason": f"Kubernetes API error {e.status}"}
     except Exception as e:
         return {"ready": False, "reason": f"cluster unreachable: {str(e)[:160]}"}

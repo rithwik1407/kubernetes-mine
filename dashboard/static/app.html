@@ -4,6 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>K3s IDS Console</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%233b6cf6' d='M12 2l9 3.5v6.5c0 5.5-3.8 9-9 10-5.2-1-9-4.5-9-10V5.5z'/%3E%3C/svg%3E">
 <script src="/static/plotly.min.js"></script>
 <style>
 :root {
@@ -158,6 +159,8 @@ pre.fix { background: var(--surface-2); border: 1px solid var(--border); border-
     <button data-view="cluster"><svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="6" rx="1.5"/><rect x="3" y="14" width="18" height="6" rx="1.5"/><path d="M7 7h.01M7 17h.01"/></svg>Cluster &amp; pods</button>
     <div class="navlabel">Analyse</div>
     <button data-view="scorer"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M9 14h6M9 17h4"/></svg>CSV scorer &amp; model</button>
+    <div class="navlabel">Health</div>
+    <button data-view="health"><svg viewBox="0 0 24 24"><path d="M9 11l3 3 8-8"/><path d="M20 12v7a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h9"/></svg>System check</button>
   </nav>
   <div class="side-foot">
     <div class="muted">Target apps</div>
@@ -177,7 +180,9 @@ pre.fix { background: var(--surface-2); border: 1px solid var(--border); border-
     </div>
   </div>
   <div class="content" id="content">
-    <div class="banner warn hidden" id="noLive">The live backend is not available in this deployment — only the CSV scorer works.</div>
+    <div class="banner bad hidden" id="noLive"><b>Live features did not load</b>, so traffic generation, capture, pods and deception are all unavailable (their API routes return 404).
+      <div class="muted" style="margin-top:4px">Reason: <code id="noLiveErr"></code></div>
+      <pre class="fix">pip install -r requirements.txt     # then restart: bash scripts/run_dashboard.sh</pre></div>
 
     <!-- reusable: target pods + pipeline (placed by JS into Live traffic / Generator) -->
     <template id="tplRun">
@@ -259,6 +264,14 @@ pre.fix { background: var(--surface-2); border: 1px solid var(--border); border-
     </section>
 
     <section id="v-cluster" class="hidden"><div id="clusterBody"></div></section>
+
+    <section id="v-health" class="hidden">
+      <div class="card"><div class="row between"><div><h2>API endpoint check</h2>
+        <p class="hint" style="margin:0">Calls every endpoint the dashboard uses. OK = working, WARN = working but something isn't ready (reason shown), FAIL = broken.</p></div>
+        <button class="btn primary" id="btnHealth">Run check again</button></div>
+        <div class="row mt" id="healthSum"></div>
+        <div class="tablewrap mt" style="max-height:none"><table id="tHealth"><thead></thead><tbody></tbody></table></div></div>
+    </section>
   </div>
   <div class="content flush hidden" id="v-scorer"><iframe id="scorer" title="CSV scorer" loading="lazy"></iframe></div>
 </div>
@@ -276,7 +289,8 @@ const TITLES = {overview:['Overview','Detection summary across live capture and 
   traffic:['Live traffic monitoring','Generate traffic, watch it captured, scored and detected'],
   lab:['Traffic generator','Launch bounded attack and benign scenarios inside the cluster'],
   deception:['Deception','MAPE-K controller and decoys'], cluster:['Cluster & pods','Target apps and lab namespaces'],
-  scorer:['CSV scorer & model','Score a CICFlowMeter CSV offline and inspect model performance']};
+  scorer:['CSV scorer & model','Score a CICFlowMeter CSV offline and inspect model performance'],
+  health:['System check','Is every API endpoint working?']};
 let CUR = 'overview', LIVE = true, SCN = {}, RUNID = null, PRE = null, TGT = null;
 
 async function api(path, opts) {
@@ -376,6 +390,7 @@ async function refreshStatus() {
   $('#sidePods').innerHTML = TGT.apps.map(a => `<div><span class="dot ${a.state === 'running' ? 'ok' : (a.state === 'cluster unreachable' ? '' : 'bad')}"></span>${esc(APP_NAMES[a.key] || a.key)}<span style="margin-left:auto;color:#6b7390">${a.state === 'running' ? 'up' : (a.state === 'cluster unreachable' ? '?' : esc(a.state))}</span></div>`).join('');
 }
 async function render() {
+  if (!LIVE) { if (CUR === 'health') await renderHealth(); return; }
   try {
     await Promise.all([refreshStatus(), refreshChips()]);
     paintShared();
@@ -384,6 +399,7 @@ async function render() {
     else if (CUR === 'lab') await renderLab();
     else if (CUR === 'deception') await renderDeception();
     else if (CUR === 'cluster') await renderCluster();
+    else if (CUR === 'health' && !renderHealth.done) await renderHealth();
   } catch (e) { console.error(e); }
 }
 const refreshAll = render;
@@ -498,6 +514,40 @@ async function renderCluster() {
   $('#clusterBody').innerHTML = html;
 }
 
+const HEALTH = [
+  ['Page', '/scorer'], ['Model', '/api/features', b => b.live ? null : 'live disabled: ' + b.live_error], ['Model', '/api/metrics'], ['Model', '/api/demo'],
+  ['Cluster', '/api/targets', b => b.all_running ? null : (b.error || b.apps.map(a => a.key + '=' + a.state).join(', '))],
+  ['Cluster', '/api/kubernetes/status', b => b.connected ? null : b.error],
+  ['Pipeline', '/api/pipeline/preflight', b => b.can_generate ? null : b.steps.filter(s => !s.ok).map(s => s.label + (s.detail ? ' (' + s.detail + ')' : '')).join('; ')],
+  ['Pipeline', '/api/pipeline/status'],
+  ['Capture', '/api/live/capture/status', b => b.support.supported ? null : b.support.reason],
+  ['Detections', '/api/live/metrics'], ['Detections', '/api/live/stats'], ['Detections', '/api/live/detections?limit=5'],
+  ['Detections', '/api/live/bursts?limit=5'], ['Detections', '/api/live/captures?limit=5'],
+  ['Traffic', '/api/trafficlab/scenarios'], ['Traffic', '/api/trafficlab/jobs', b => b[0] && b[0].error ? b[0].error : null],
+  ['Deception', '/api/deception/status', b => b.kubernetes_available === false ? 'Kubernetes unavailable to controller: ' + (b.kubernetes_error || '') : null],
+  ['Deception', '/api/deception/policy'], ['Deception', '/api/deception/decisions?limit=5'], ['Deception', '/api/deception/decoys?limit=5'],
+  ['Deception', '/api/deception/interactions?limit=5'], ['Deception', '/api/deception/test-events?limit=5'],
+];
+async function renderHealth() {
+  renderHealth.done = true;
+  const rows = []; let ok = 0, warn = 0, fail = 0;
+  table('#tHealth', ['Area', 'Endpoint', 'Result', 'Time', 'Detail'], [['', 'running…', '', '', '']]);
+  for (const [area, path, check] of HEALTH) {
+    const t0 = performance.now(); let res = 'OK', detail = '';
+    try {
+      const r = await fetch(path);
+      if (!r.ok) { res = 'FAIL'; detail = 'HTTP ' + r.status + (r.status === 404 ? ' — live features not loaded (see banner)' : ''); }
+      else if (check) { const b = path === '/scorer' ? null : await r.json(); const m = b && check(b); if (m) { res = 'WARN'; detail = m; } }
+    } catch (e) { res = 'FAIL'; detail = e.message; }
+    res === 'OK' ? ok++ : res === 'WARN' ? warn++ : fail++;
+    rows.push([area, `<code>${esc(path)}</code>`, `<span class="pill ${res === 'OK' ? 'ok' : res === 'WARN' ? 'warn' : 'bad'}">${res}</span>`,
+      Math.round(performance.now() - t0) + ' ms', `<span style="white-space:normal">${esc(detail)}</span>`]);
+    table('#tHealth', ['Area', 'Endpoint', 'Result', 'Time', 'Detail'], rows);
+  }
+  $('#healthSum').innerHTML = `<span class="pill ok">${ok} OK</span><span class="pill warn">${warn} WARN</span><span class="pill bad">${fail} FAIL</span>`;
+}
+$('#btnHealth').onclick = () => renderHealth();
+
 /* ---------- helpers ---------- */
 function table(sel, cols, rows) {
   $(sel + ' thead').innerHTML = '<tr>' + cols.map(c => `<th>${c}</th>`).join('') + '</tr>';
@@ -510,12 +560,13 @@ const statePill = s => { const k = {running: 'ok', active: 'ok', succeeded: 'ok'
 
 async function boot() {
   let feat; try { feat = await api('/api/features'); } catch (e) { feat = {live: false}; }
-  LIVE = feat.live; $('#noLive').classList.toggle('hidden', LIVE);
+  LIVE = feat.live; $('#noLive').classList.toggle('hidden', LIVE); $('#noLiveErr').textContent = feat.live_error || 'unknown';
   try { SCN = await api('/api/trafficlab/scenarios'); } catch (e) {}
   const v = (location.hash || '#overview').slice(1);
   go(TITLES[v] ? v : 'overview');
   setInterval(() => { if (!document.hidden && CUR !== 'scorer' && LIVE) render(); }, 4000);
 }
+window.addEventListener('hashchange', () => { const v = location.hash.slice(1); if (TITLES[v] && v !== CUR) go(v); });
 boot();
 </script>
 </body>

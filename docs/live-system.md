@@ -145,7 +145,8 @@ traffic is ever redirected.
 ## Tests
 
 ```bash
-python -m pytest -q        # 22 tests; no cluster required
+python -m pytest -q        # 22 tests
+python scripts/check_api.py   # checks every API endpoint (run this before opening the UI); no cluster required
 ```
 
 They cover the CSV schema quirks and feature aliasing, flow-burst detection, the

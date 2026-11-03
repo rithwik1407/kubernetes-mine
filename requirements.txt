@@ -11,3 +11,7 @@ joblib
 fastapi
 uvicorn
 python-multipart
+# Live pipeline, traffic lab, deception, cluster status
+pyyaml
+kubernetes>=31.0
+httpx           # used by scripts/check_api.py (FastAPI TestClient)
