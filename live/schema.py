@@ -84,8 +84,22 @@ def align_features(df: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame,
 
 
 def parse_timestamps(series: pd.Series) -> pd.Series:
-    """CICFlowMeter writes day-first timestamps, e.g. 30/10/2026 12:19:24 PM."""
-    return pd.to_datetime(series, format="mixed", dayfirst=True, errors="coerce")
+    """Flow start times from either CICFlowMeter build.
+
+    The live extractor (GintsEngelen fork) writes ISO times, "2026-11-05 11:00:12.836503".
+    The original CICFlowMeter-V3 writes day-first times, "30/10/2026 12:19:24 PM". Parsing
+    ISO strings with dayfirst=True swaps day and month whenever the day is 12 or less
+    (2026-11-05 became 2026-05-11). Every flow then looked months old, and the window-context
+    filter dropped all of them. So ISO is parsed strictly first, and only what does not
+    match falls back to day-first.
+    """
+    s = series.astype("string").str.strip()
+    out = pd.to_datetime(s, format="ISO8601", errors="coerce")
+    rest = out.isna() & s.notna()
+    if rest.any():
+        out = out.astype("datetime64[ns]")
+        out.loc[rest] = pd.to_datetime(s[rest], format="mixed", dayfirst=True, errors="coerce").astype("datetime64[ns]")
+    return out
 
 
 def _valid_ip(v) -> bool:

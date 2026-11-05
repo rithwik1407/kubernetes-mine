@@ -160,12 +160,14 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
             if item is None:
                 return
             pcap, end_mono, fields = item
+            t_proc = time.monotonic()
             try:
                 res = process_pcap(Path(pcap), predictor, cfg, window_end_monotonic=end_mono, capture_fields=fields)
             except Exception as e:  # keep the service alive; the failure is recorded
                 log.exception("processing %s failed", pcap)
                 res = {"pcap": Path(pcap).name, "status": "failed", "error": str(e)}
             with lock:
+                evidence.processing_s = time.monotonic() - t_proc
                 stats["processed"] += 1
                 stats["failed"] += res.get("status") == "failed"
                 stats["last_result"] = res
@@ -205,7 +207,8 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
                 final = {"status": "error", "error": res.error}
                 raise CaptureError(res.error)
             with lock:
-                ev = adaptive.Evidence(**{**evidence.__dict__, "packets": res.packets, "duration_s": res.duration_s})
+                ev = adaptive.Evidence(**{**evidence.__dict__, "packets": res.packets, "duration_s": res.duration_s,
+                                          "backlog": work.qsize() if process else 0})
             decision = adaptive.decide(window, ev, wcfg)
             next_window = decision.next_s
             fields = {"interface": res.interface, "started_at": res.started_at, "ended_at": res.ended_at,

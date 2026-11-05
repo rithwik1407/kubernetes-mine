@@ -101,10 +101,10 @@ traffic_lab:
     #   delay = seconds the generator waits between two of them (0 = as fast as possible)
     benign:      {mode: benign,      default_target: nodered,  detectable: false, expect_class: BENIGN,     count: 120, delay: 0.5,  env: {MIN_DELAY: "0.5", MAX_DELAY: "1.5"}, description: "Low-rate browsing and health checks against the lab services"}
     web_recon:   {mode: web_recon,   default_target: nodered,  detectable: false, expect_class: BENIGN,     count: 400, delay: 0.02, description: "Bounded HTTP path enumeration of Node-RED (caught by the flow-burst detector, not the model)"}
-    port_scan:   {mode: port_scan,   default_target: nodered,  detectable: true,  expect_class: PortScan,   count: 1024, delay: 0.01, env: {PORT_START: "1", PORT_END: "1024", SCAN_TIMEOUT: "1"}, description: "TCP connect scan of ports 1-1024 on the pod behind a lab service"}
-    slow_dos:    {mode: slow_dos,    default_target: nodered,  detectable: true,  expect_class: DoS,        count: 150, delay: 0.05, env: {SLOW_CONNS: "150", SLOW_HOLD_S: "20"}, description: "Many slow partial HTTP connections held open against a lab service"}
-    brute_force: {mode: brute_force, default_target: grafana,  detectable: true,  expect_class: BruteForce, count: 500, delay: 0.02, env: {LOGIN_PATH: /login}, description: "Repeated failed logins against the Grafana login API"}
-    web_attack:  {mode: web_attack,  default_target: nodered,  detectable: true,  expect_class: WebAttack,  count: 400, delay: 0.02, description: "HTTP requests carrying SQLi / XSS-style strings at a lab web service"}
+    port_scan:   {mode: port_scan,   default_target: nodered,  detectable: true,  expect_class: PortScan,   count: 1024, delay: 0.05, env: {PORT_START: "1", PORT_END: "1024", SCAN_TIMEOUT: "1"}, description: "TCP connect scan of ports 1-1024 on the pod behind a lab service"}
+    slow_dos:    {mode: slow_dos,    default_target: nodered,  detectable: true,  expect_class: DoS,        count: 150, delay: 0.3, env: {SLOW_CONNS: "150", SLOW_HOLD_S: "20"}, description: "Many slow partial HTTP connections held open against a lab service"}
+    brute_force: {mode: brute_force, default_target: grafana,  detectable: true,  expect_class: BruteForce, count: 500, delay: 0.1, env: {LOGIN_PATH: /login}, description: "Repeated failed logins against the Grafana login API"}
+    web_attack:  {mode: web_attack,  default_target: nodered,  detectable: true,  expect_class: WebAttack,  count: 400, delay: 0.15, description: "HTTP requests carrying SQLi / XSS-style strings at a lab web service"}
     decoy_probe: {mode: decoy_probe,                           detectable: false, expect_class: null,       count: 120, delay: 0.1,  description: "Requests to the deployed decoy services, to exercise interaction logging"}
   # After every Job of a run has finished, wait this long so the last capture
   # window closes and is scored, then stop capture automatically.

@@ -120,8 +120,10 @@ def live_detections(limit: int = Query(200, ge=1, le=5000), offset: int = Query(
                     source: Literal["upload", "pcap", "live"] | None = None,
                     predicted_class: str | None = Query(None, max_length=64),
                     src_ip: str | None = Query(None, max_length=64),
-                    malicious: bool | None = None):
-    return queries.detections(limit, offset, source, predicted_class, src_ip, malicious, CFG)
+                    malicious: bool | None = None,
+                    lab_scenario: str | None = Query(None, max_length=64, pattern=r"^[a-z_]+$")):
+    """lab_scenario: a Traffic-lab scenario (port_scan, ...) or "any" for flows of any lab pod."""
+    return queries.detections(limit, offset, source, predicted_class, src_ip, malicious, CFG, lab_scenario)
 
 
 @router.get("/api/live/stats")

@@ -31,7 +31,8 @@ CREATE TABLE IF NOT EXISTS detections (
     predicted_class TEXT NOT NULL, confidence REAL NOT NULL, is_malicious INTEGER NOT NULL,
     capture_file TEXT, source TEXT NOT NULL, processing_time_ms REAL, detected_at TEXT NOT NULL,
     true_label TEXT, model TEXT, simulated INTEGER NOT NULL DEFAULT 0,
-    flow_duration_us REAL, packets INTEGER, bytes INTEGER, allowlisted TEXT
+    flow_duration_us REAL, packets INTEGER, bytes INTEGER, allowlisted TEXT,
+    lab_scenario TEXT, lab_job TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_det_detected_at ON detections(detected_at);
 CREATE INDEX IF NOT EXISTS idx_det_malicious   ON detections(is_malicious);
@@ -102,7 +103,7 @@ DETECTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious", "capture_file", "source",
     "processing_time_ms", "detected_at", "true_label", "model",
-    "flow_duration_us", "packets", "bytes", "allowlisted",
+    "flow_duration_us", "packets", "bytes", "allowlisted", "lab_scenario", "lab_job",
 ]
 
 
@@ -129,7 +130,7 @@ def connect(path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
 
 _MIGRATIONS = {"captures": {"window_s": "REAL"}, "behavior_alerts": {"distinct_ports": "INTEGER"},
                "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER",
-                              "allowlisted": "TEXT"}}
+                              "allowlisted": "TEXT", "lab_scenario": "TEXT", "lab_job": "TEXT"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

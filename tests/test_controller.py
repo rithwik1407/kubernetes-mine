@@ -70,7 +70,41 @@ def test_aggregated_portscan_deploys_decoy(cfg):
     assert len(eng) == 1 and eng[0]["src_ip"] == "10.42.0.9" and eng[0]["state"] == "active"
     assert "decoy-web-portal" in eng[0]["decoys"]
     with db.connect(DBP[0]) as c:
-        assert c.execute("SELECT COUNT(*) FROM decisions WHERE action = 'redirect'").fetchone()[0] == 1
+        assert c.execute("SELECT COUNT(*) FROM decisions WHERE action = 'engage'").fetchone()[0] == 1
+        # no redirect before the decoy is Ready
+        assert c.execute("SELECT COUNT(*) FROM decisions WHERE action = 'redirect'").fetchone()[0] == 0
+
+
+class FakeRedirector:
+    def __init__(self):
+        self.calls = []
+    def quarantine(self, ip, cfg, redirect_to=None):
+        self.calls.append((ip, redirect_to))
+        return {"applied": True, "namespace": "ids-traffic", "pod": "p", "label": "l", "to": redirect_to,
+                "reason": f"redirected to {redirect_to}"}
+    def release(self, rd, cfg):
+        self.calls.append(("release", rd.get("to")))
+        return {"released": True, "reason": "released"}
+
+
+def test_redirect_waits_for_ready_decoy_then_points_source_at_it(cfg):
+    mgr, red = FakeManager(), FakeRedirector()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.redirector = red
+    ctl.set_enabled(True)
+    _flows("PortScan", ctl.class_policy("PortScan")["min_flows"], 0.97)
+    ctl.run_cycle()                       # engage + deploy (decoy not Ready yet)
+    assert red.calls == []
+    assert ctl.engagements()[0]["redirect"]["pending"]
+    ctl.run_cycle()                       # housekeeping sees the decoy Ready -> redirect
+    assert red.calls == [("10.42.0.9", "decoy-web-portal.ids-deception.svc.cluster.local:80")]
+    e = ctl.engagements()[0]
+    assert e["redirect"]["applied"] and e["redirect"]["decoy"] == "decoy-web-portal"
+    ctl.run_cycle()                       # applied once only
+    assert len(red.calls) == 1
+    with db.connect(DBP[0]) as c:
+        r = c.execute("SELECT result, reason FROM decisions WHERE action = 'redirect'").fetchall()
+    assert len(r) == 1 and r[0][0] == "ok" and "is Ready" in r[0][1]
 
 
 def test_low_mean_confidence_does_not_trigger(cfg):
@@ -178,3 +212,14 @@ def test_unknown_simulated_class_rejected(cfg):
     ctl = MapeKController(cfg, manager=FakeManager())
     with pytest.raises(ValueError):
         ctl.submit_simulated_event("NotARealClass", 0.9)
+
+
+def test_decoy_pod_is_never_engaged(cfg, monkeypatch):
+    """Decoy replies can look like a sweep (reverse-direction flows); the decoy itself is not an attacker."""
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    monkeypatch.setattr(ctl, "decoy_ips", lambda: {"10.42.0.9"})
+    ctl.set_enabled(True)
+    _flows("PortScan", 20, 0.99)
+    ctl.run_cycle()
+    assert mgr.deployed == {} and ctl.engagements() == []

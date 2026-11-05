@@ -202,3 +202,73 @@ def test_activity_buckets_mark_capture_off(cfg):
     assert len(on) == 1 and on[0]["malicious"] == 1
     assert sum(b["capture_on"] is False for b in a["buckets"]) >= 15
     assert a["events"][0]["predicted_class"] == "DoS"
+
+
+# --- scenario tags, generator redirect ---------------------------------------------
+def test_lab_scenario_tags_prefer_running_pod_on_ip_reuse():
+    from datetime import datetime, timezone
+    from types import SimpleNamespace as NS
+    import pandas as pd
+    from live import labsources
+
+    def pod(name, ip, phase, scen, job, t):
+        return NS(metadata=NS(name=name, labels={"app": "traffic-lab", "scenario": scen, "job-name": job}),
+                  status=NS(pod_ip=ip, phase=phase, start_time=datetime(2026, 1, 1, 0, t, tzinfo=timezone.utc)))
+    m = labsources.build_map([pod("a", "10.42.0.5", "Succeeded", "port-scan", "traffic-port-scan-x", 1),
+                              pod("b", "10.42.0.5", "Running", "web-attack", "traffic-web-attack-y", 0),
+                              pod("c", "10.42.0.6", "Succeeded", "brute-force", "traffic-brute-force-z", 2)])
+    assert m["10.42.0.5"]["scenario"] == "web_attack"
+    pred = pd.DataFrame({"src_ip": ["10.42.0.5", "10.43.0.9", "1.2.3.4"],
+                         "dst_ip": ["10.43.0.9", "10.42.0.6", "5.6.7.8"]})
+    out = labsources.tag(pred, m)
+    assert list(out["lab_scenario"]) == ["web_attack", "brute_force", None]
+    assert out["lab_job"][1] == "traffic-brute-force-z"
+
+
+def test_build_job_mounts_annotations_for_redirect(cfg):
+    from live.trafficlab import build_job
+    j = build_job("port_scan", cfg, target="10.42.0.7:1880")
+    spec = j["spec"]["template"]["spec"]
+    vol = next(v for v in spec["volumes"] if v["name"] == "podinfo")
+    assert vol["downwardAPI"]["items"][0]["fieldRef"]["fieldPath"] == "metadata.annotations"
+    env = {e["name"]: e["value"] for e in spec["containers"][0]["env"]}
+    assert env["REDIRECT_FILE"] == "/etc/podinfo/annotations"
+
+
+def test_generator_follows_redirect_annotation(tmp_path, monkeypatch, capsys):
+    import importlib.util
+    from pathlib import Path
+    f = tmp_path / "annotations"
+    f.write_text('ids/other="x"\n')
+    monkeypatch.setenv("REDIRECT_FILE", str(f))
+    src = Path(__file__).resolve().parents[1] / "deploy" / "traffic-lab" / "traffic_generator.py"
+    spec = importlib.util.spec_from_file_location("tg_redirect", src)
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    assert g.aim("nodered.target-apps.svc.cluster.local", 1880) == ("nodered.target-apps.svc.cluster.local", 1880)
+    f.write_text('ids/other="x"\nids-deception/redirect-to="decoy-nodered.ids-deception.svc.cluster.local:1880"\n')
+    g._REDIRECT["checked"] = 0.0
+    assert g.aim("10.42.0.9", 22) == ("decoy-nodered.ids-deception.svc.cluster.local", 1880)
+    assert g.aim_url("http://grafana.target-apps.svc.cluster.local:3000") == \
+        "http://decoy-nodered.ids-deception.svc.cluster.local:1880"
+    assert '"action": "redirected"' in capsys.readouterr().out
+
+
+def test_window_grows_when_scoring_falls_behind_and_never_shrinks_below_it(cfg):
+    from live.window import Evidence, decide
+    w = cfg["capture"]["window"]
+    d = decide(1, Evidence(packets=900, duration_s=1, processing_s=2.1, backlog=5), w)
+    assert d.rule == "R0_backlog" and d.next_s == 3
+    d = decide(3, Evidence(packets=900, duration_s=3, processing_s=2.1, bursts=1), w)   # threat, but can't go below 3
+    assert d.next_s == 3
+    d = decide(3, Evidence(packets=3000, duration_s=3, processing_s=2.1), w)            # high rate: hold at 3
+    assert d.next_s == 3
+    d = decide(3, Evidence(packets=3000, duration_s=3, processing_s=0.4), w)            # fast scoring: may shrink
+    assert d.next_s == 1
+
+
+def test_parse_timestamps_iso_is_not_day_swapped():
+    import pandas as pd
+    from live.schema import parse_timestamps
+    got = parse_timestamps(pd.Series(["2026-11-05 11:00:12.836503", "30/10/2026 12:19:24 PM", "05/11/2026 11:00:12 AM"]))
+    assert [str(t.date()) for t in got] == ["2026-11-05", "2026-10-30", "2026-11-05"]

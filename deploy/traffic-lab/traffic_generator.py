@@ -58,7 +58,16 @@ LOGIN_PATH = os.environ.get("LOGIN_PATH", "/login")
 TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_S", "0"))   # 0 = unlimited
 _T0 = time.monotonic()
 _COUNTS = {"ok": 0, "errors": 0}
-_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal"}
+_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected"}
+# Deception redirect. The pod's own annotations are mounted here through the downward
+# API (Kubernetes refreshes the file within seconds of a change). When the deception
+# controller has engaged this pod, it sets ids-deception/redirect-to=<decoy host:port>
+# and quarantines the pod (NetworkPolicy: decoys and DNS only). From then on every new
+# connection goes to the decoy, as a transparent DNAT on the node would do it. That
+# needs root on the node, which the lab does not have.
+REDIRECT_FILE = os.environ.get("REDIRECT_FILE", "")
+REDIRECT_KEY = "ids-deception/redirect-to"
+_REDIRECT = {"checked": 0.0, "to": None}
 
 
 def emit(**fields) -> None:
@@ -80,6 +89,40 @@ def out_of_time() -> bool:
     return True
 
 
+def redirect_target() -> tuple[str, int] | None:
+    """The decoy this pod was redirected to, or None (file re-read at most once a second)."""
+    if not REDIRECT_FILE or time.monotonic() - _REDIRECT["checked"] < 1.0:
+        return _REDIRECT["to"]
+    _REDIRECT["checked"] = time.monotonic()
+    to = None
+    try:
+        with open(REDIRECT_FILE, encoding="utf-8") as f:
+            for line in f:
+                key, _, val = line.strip().partition("=")
+                if key == REDIRECT_KEY and val.strip('"'):
+                    to = host_port(val.strip('"'), 80)
+    except (OSError, ValueError):
+        to = None
+    if to != _REDIRECT["to"]:
+        emit(action="redirected", to=f"{to[0]}:{to[1]}" if to else None,
+             note="deception redirect: new connections go to the decoy" if to else "redirect removed")
+        _REDIRECT["to"] = to
+    return to
+
+
+def aim(host: str, port: int) -> tuple[str, int]:
+    """Where a new connection to host:port actually goes (the decoy while redirected)."""
+    return redirect_target() or (host, port)
+
+
+def aim_url(url: str) -> str:
+    to = redirect_target()
+    if not to:
+        return url
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parts.scheme, f"{to[0]}:{to[1]}", parts.path, parts.query, parts.fragment))
+
+
 def host_port(target: str, default_port: int) -> tuple[str, int]:
     if ":" in target:
         host, port = target.rsplit(":", 1)
@@ -90,7 +133,7 @@ def host_port(target: str, default_port: int) -> tuple[str, int]:
 def http_get(url: str, path: str = "") -> None:
     # percent-encode spaces/quotes in the path+query (urllib refuses raw spaces, which made
     # a third of the web_attack requests fail locally without ever reaching the target)
-    full = url.rstrip("/") + urllib.parse.quote(path, safe="/?=&%:@!$'()*+,;-._~")
+    full = aim_url(url.rstrip("/")) + urllib.parse.quote(path, safe="/?=&%:@!$'()*+,;-._~")
     req = urllib.request.Request(full, headers={"User-Agent": "ids-lab/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -150,17 +193,25 @@ def run_port_scan() -> None:
             break
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(SCAN_TIMEOUT)
+        dest = aim(host, port)                 # (decoy host, decoy port) once redirected
+        extra = {"redirected_to": f"{dest[0]}:{dest[1]}"} if dest != (host, port) else {}
         try:
-            rc = s.connect_ex((host, port))
+            rc = s.connect_ex(dest)
             if rc == 0:
                 opened += 1
-                emit(action="port_open", host=host, port=port)
+                if extra:                      # redirected: grab a banner, as nmap -sV would, so the decoy logs it
+                    try:
+                        s.sendall(f"HEAD / HTTP/1.0\r\nHost: {host}\r\nX-Scan-Port: {port}\r\n\r\n".encode())
+                        s.recv(256)
+                    except OSError:
+                        pass
+                emit(action="port_open", host=host, port=port, **extra)
             elif rc in (111, 61):          # ECONNREFUSED (Linux, BSD): the host answered with RST
-                emit(action="port_closed", host=host, port=port)
+                emit(action="port_closed", host=host, port=port, **extra)
             else:                          # no answer (filtered / timeout)
-                emit(action="port_filtered", host=host, port=port, error=f"errno{rc}")
+                emit(action="port_filtered", host=host, port=port, error=f"errno{rc}", **extra)
         except Exception as e:  # noqa: BLE001
-            emit(action="port_error", host=host, port=port, error=type(e).__name__)
+            emit(action="port_error", host=host, port=port, error=type(e).__name__, **extra)
         finally:
             s.close()
         time.sleep(DELAY)
@@ -182,13 +233,14 @@ def run_slow_dos() -> None:
             break
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TIMEOUT)
+        dhost, dport = aim(host, port)
         try:
-            s.connect((host, port))
-            s.sendall(f"GET /?{i} HTTP/1.1\r\nHost: {host}\r\n".encode())  # headers never completed
+            s.connect((dhost, dport))
+            s.sendall(f"GET /?{i} HTTP/1.1\r\nHost: {dhost}\r\n".encode())  # headers never completed
             socks.append(s)
-            emit(action="slow_conn", host=host, port=port, n=i)
+            emit(action="slow_conn", host=dhost, port=dport, n=i)
         except Exception as e:  # noqa: BLE001
-            emit(action="slow_conn", host=host, port=port, n=i, error=type(e).__name__)
+            emit(action="slow_conn", host=dhost, port=dport, n=i, error=type(e).__name__)
             s.close()
         time.sleep(DELAY)
     emit(action="slow_established", host=host, established=len(socks))
@@ -223,7 +275,7 @@ def run_brute_force() -> None:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(TIMEOUT)
             try:
-                if s.connect_ex((host, port)) == 0:
+                if s.connect_ex(aim(host, port)) == 0:
                     s.recv(64)                   # read the banner, then drop (no auth performed)
                 emit(action="ssh_attempt", host=host, port=port, user=random.choice(USERS), n=i)
             except Exception as e:  # noqa: BLE001
@@ -238,15 +290,16 @@ def run_brute_force() -> None:
                 break
             user = random.choice(USERS)
             data = json.dumps({"user": user, "username": user, "password": f"wrong-{i}"}).encode()
-            req = urllib.request.Request(base + LOGIN_PATH, data=data, method="POST",
+            url = aim_url(base) + LOGIN_PATH
+            req = urllib.request.Request(url, data=data, method="POST",
                                          headers={"User-Agent": "ids-lab/1.0", "Content-Type": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                    emit(action="login_attempt", url=base + LOGIN_PATH, status=resp.status, n=i)
+                    emit(action="login_attempt", url=url, status=resp.status, n=i)
             except urllib.error.HTTPError as e:
-                emit(action="login_attempt", url=base + LOGIN_PATH, status=e.code, n=i)
+                emit(action="login_attempt", url=url, status=e.code, n=i)
             except Exception as e:  # noqa: BLE001
-                emit(action="login_error", url=base + LOGIN_PATH, error=type(e).__name__)
+                emit(action="login_error", url=url, error=type(e).__name__)
             time.sleep(DELAY)
     emit(action="done", scenario="brute_force")
 

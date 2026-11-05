@@ -17,8 +17,10 @@ def cfg(tmp_path):
          # unit tests never talk to a cluster: static allowlist only, no redirect
          "detection": {**c["detection"], "allowlist": {**c["detection"]["allowlist"], "discover": False}},
          "deception": {**c["deception"], "redirect": {**c["deception"]["redirect"], "enabled": False}}}
-    from live import allowlist
+    from live import allowlist, labsources
     allowlist.reset_cache()
+    labsources._CACHE.update(at=float("inf"), value={}, error=None)   # no pod lookups in unit tests
+    labsources._DECOYS.update(at=float("inf"), value=set())
     return c
 
 

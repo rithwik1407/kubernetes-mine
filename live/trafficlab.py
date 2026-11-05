@@ -200,6 +200,8 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "PYTHONUNBUFFERED", "value": "1"},
         # finish (and log why) before Kubernetes kills the pod at activeDeadlineSeconds
         {"name": "TIME_BUDGET_S", "value": str(max(10, deadline - 30))},
+        # the deception controller's redirect (live/redirect.py) arrives as a pod annotation
+        {"name": "REDIRECT_FILE", "value": "/etc/podinfo/annotations"},
     ]
     env += [{"name": str(k), "value": str(v)} for k, v in (sc.get("env") or {}).items()]
     container = {
@@ -209,7 +211,8 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
                       "limits": {"cpu": "200m", "memory": "96Mi"}},
         "securityContext": {"allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
                             "capabilities": {"drop": ["ALL"]}},
-        "volumeMounts": [{"name": "script", "mountPath": "/app", "readOnly": True}],
+        "volumeMounts": [{"name": "script", "mountPath": "/app", "readOnly": True},
+                         {"name": "podinfo", "mountPath": "/etc/podinfo", "readOnly": True}],
     }
     expect = sc.get("expect_class")
     labels = {"app": "traffic-lab", "scenario": slug, "expect-class": slugify(expect or "none")}
@@ -220,7 +223,9 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
             "securityContext": {"runAsNonRoot": True, "runAsUser": 65534, "runAsGroup": 65534,
                                 "seccompProfile": {"type": "RuntimeDefault"}},
             "containers": [container],
-            "volumes": [{"name": "script", "configMap": {"name": "traffic-generator-script"}}],
+            "volumes": [{"name": "script", "configMap": {"name": "traffic-generator-script"}},
+                        {"name": "podinfo", "downwardAPI": {"items": [
+                            {"path": "annotations", "fieldRef": {"fieldPath": "metadata.annotations"}}]}}],
         },
     }
     return {

@@ -291,6 +291,10 @@ class MapeKController:
             if a["simulated"] or not src:
                 out.append(a)
                 continue
+            if src in self.decoy_ips():
+                out.append({**a, "actionable": False, "assessment": "decoy",
+                            "reason": a["reason"] + f"; {src} is one of our decoy pods (its replies), never acted on"})
+                continue
             eng = c.execute("SELECT * FROM engagements WHERE src_ip = ? AND state = 'active'", (src,)).fetchone()
             if a["actionable"]:
                 if eng:
@@ -304,17 +308,18 @@ class MapeKController:
                              "reason": a["reason"] + f"; {src} was released {(now - last).total_seconds():.0f}s ago "
                                                      f"(re-engage cooldown {wait:.0f}s)"}
                     else:
-                        rd = self.redirector.quarantine(src, self.cfg) if self.redirector else \
-                            {"applied": False, "reason": "redirect not configured"}
+                        # The source is redirected only once one of its decoys is Ready
+                        # (_apply_redirects); until then its traffic still reaches the real service.
+                        rd = {"applied": False, "pending": True, "reason": "waiting for a Ready decoy"}
                         eid = db.insert_row(c, "engagements", src_ip=src, attack_class=a["attack_class"],
                                             trigger=a["trigger"], state="active", started_at=iso(now),
                                             last_evidence_at=iso(now), decoys="[]", redirect=json.dumps(rd),
                                             reason=a["reason"])
                         self._record(c, cycle_id, trigger=a["trigger"], src_ip=src, attack_class=a["attack_class"],
                                      assessment=a["assessment"], max_confidence=a.get("max_confidence"),
-                                     evidence_count=a.get("evidence_count"), action="redirect",
-                                     result="ok" if rd.get("applied") else "skipped",
-                                     reason=f"engagement #{eid} opened: {a['reason']}. Redirect: {rd['reason']}",
+                                     evidence_count=a.get("evidence_count"), action="engage", result="ok",
+                                     reason=f"engagement #{eid} opened: {a['reason']}. The source is redirected "
+                                            f"to its decoy as soon as the decoy is Ready",
                                      evidence={**(a.get("evidence") or {}), "engagement_id": eid})
                         a = {**a, "engagement_id": eid}
             elif eng and a.get("sustains"):
@@ -324,6 +329,10 @@ class MapeKController:
             out.append(a)
         return out
 
+    def decoy_ips(self) -> set[str]:
+        from live import labsources
+        return labsources.decoy_ips(self.cfg)
+
     def _link_decoy(self, c, engagement_id: int | None, name: str | None) -> None:
         if not engagement_id or not name:
             return
@@ -331,6 +340,32 @@ class MapeKController:
         names = json.loads(row["decoys"] or "[]") if row else []
         if name not in names:
             db.update_row(c, "engagements", engagement_id, decoys=json.dumps(names + [name]))
+
+    def _apply_redirects(self, c, cycle_id: int, out: dict[str, Any]) -> None:
+        """Redirect each engaged source to a Ready decoy of its engagement (once)."""
+        ns = self.d["namespace"]
+        for e in [dict(r) for r in c.execute("SELECT * FROM engagements WHERE state = 'active'")]:
+            rd = json.loads(e["redirect"] or "{}")
+            if not rd.get("pending"):
+                continue
+            names = json.loads(e["decoys"] or "[]")
+            ready = [dict(r) for r in c.execute(
+                f"SELECT * FROM decoys WHERE status = 'active' AND name IN ({','.join('?' * len(names))}) ORDER BY id",
+                names)] if names else []
+            if not ready:
+                continue
+            d = min(ready, key=lambda r: names.index(r["name"]))   # the policy's preferred decoy
+            to = f"{d['name']}.{ns}.svc.cluster.local:{d['port']}"
+            new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to) if self.redirector else \
+                {"applied": False, "reason": "redirect not configured"}
+            new["decoy"] = d["name"]
+            db.update_row(c, "engagements", e["id"], redirect=json.dumps(new))
+            self._record(c, cycle_id, trigger="engagement", src_ip=e["src_ip"], attack_class=e["attack_class"],
+                         action="redirect", decoy_profile=d["profile"], decoy_name=d["name"],
+                         result="ok" if new.get("applied") else "skipped", assessment="n/a",
+                         reason=f"engagement #{e['id']}: decoy {d['name']} is Ready. Redirect: {new['reason']}",
+                         evidence={"engagement_id": e["id"]})
+            out.setdefault("redirected", []).append(e["src_ip"])
 
     def _release_quiet(self, c, cycle_id: int, out: dict[str, Any]) -> None:
         """Release engagements without evidence or decoy interaction for quiet_seconds."""
@@ -406,6 +441,8 @@ class MapeKController:
                 name = decoy_name(profile)
                 act = {**a, "profile": profile, "name": name}
                 if name in planned:
+                    # another source in this cycle already asked for this decoy: share it
+                    self._link_decoy(c, a.get("engagement_id"), name)
                     continue
                 if name in decoys:
                     d = decoys[name]
@@ -578,6 +615,7 @@ class MapeKController:
                     continue
             out["interactions"] += self._collect_for(c, r["name"])
 
+        self._apply_redirects(c, cycle_id, out)
         self._release_quiet(c, cycle_id, out)
         e = self.d["engagement"]
         since = iso(now - timedelta(seconds=e["window_seconds"]))

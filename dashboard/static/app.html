@@ -253,6 +253,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       <div class="filters">
         <label class="filter">Class <select id="flClass"><option value="">all</option></select></label>
         <label class="filter">Status <select id="flMal"><option value="">all</option><option value="true">malicious</option><option value="false">benign</option></select></label>
+        <label class="filter">Scenario <select id="flLab"><option value="">all flows</option><option value="any">any lab scenario</option></select></label>
         <label class="filter">Source IP <input id="flSrc" placeholder="10.42.0.12" size="14" maxlength="64"></label>
         <label class="filter">Rows <select id="flLimit"><option>100</option><option selected>200</option><option>500</option></select></label>
       </div>
@@ -605,7 +606,10 @@ function setBadge(n) { const b = $("threatBadge"); b.hidden = !n; b.textContent 
 async function pageTraffic() {
   const cls = $("flClass").value, mal = $("flMal").value, src = $("flSrc").value.trim(), lim = $("flLimit").value;
   if (src && !/^[0-9a-fA-F:.]{2,64}$/.test(src)) { $("flowsTable").innerHTML = errBox("Source IP: use an IPv4/IPv6 address"); return; }
-  const q = new URLSearchParams({ limit: lim }); if (cls) q.set("predicted_class", cls); if (mal) q.set("malicious", mal); if (src) q.set("src_ip", src);
+  const lab = $("flLab").value;
+  const q = new URLSearchParams({ limit: lim }); if (cls) q.set("predicted_class", cls); if (mal) q.set("malicious", mal); if (src) q.set("src_ip", src); if (lab) q.set("lab_scenario", lab);
+  if ($("flLab").options.length === 2) api("/api/trafficlab/scenarios").then(sc => $("flLab").insertAdjacentHTML("beforeend",
+    Object.keys(sc.scenarios).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join(""))).catch(() => { });
   const [cs, rows] = await Promise.all([api("/api/live/capture/status"), api("/api/live/detections?" + q)]);
   const sv = cs.service, last = (cs.recent || [])[0];
   $("capHint").innerHTML = !cs.support.supported ? `<span style="color:var(--warning-ink)">Capture unavailable: ${esc(cs.support.reason)}</span>`
@@ -626,7 +630,8 @@ async function pageTraffic() {
     { h: "Proto", f: r => ({ 6: "TCP", 17: "UDP", 1: "ICMP" }[r.protocol] || esc(r.protocol)) },
     { h: "Duration", num: 1, f: r => r.flow_duration_us === null || r.flow_duration_us === undefined ? "—" : fmt(r.flow_duration_us / 1000, 1) + " ms" },
     { h: "Packets", num: 1, f: r => fmt(r.packets) }, { h: "Class", f: r => clsTag(r.predicted_class) },
-    { h: "Confidence", num: 1, f: r => fmt(r.confidence, 3) }, { h: "Window", f: r => `<span class="mono" title="${esc(r.capture_file)}">${esc((r.capture_file || "").slice(-28))}</span>` },
+    { h: "Confidence", num: 1, f: r => fmt(r.confidence, 3) },
+    { h: "Scenario", f: r => r.lab_scenario ? `<span title="${esc(r.lab_job || "")}">${esc(r.lab_scenario)}</span>` : "—" }, { h: "Window", f: r => `<span class="mono" title="${esc(r.capture_file)}">${esc((r.capture_file || "").slice(-28))}</span>` },
   ], rows, { rowClass: r => r.is_malicious ? "mal" : "", emptyTitle: "No flows scored yet", emptyBody: "Start capture and generate traffic in the Traffic lab." });
 }
 
@@ -987,7 +992,7 @@ document.querySelectorAll("nav button").forEach(b => b.addEventListener("click",
 $("menuBtn").onclick = () => $("side").classList.toggle("open");
 $("refreshBtn").onclick = () => { loadChrome(); refresh(true); };
 $("pauseBtn").onclick = () => { S.paused = !S.paused; $("pauseBtn").textContent = S.paused ? "Resume" : "Pause"; $("pauseBtn").setAttribute("aria-pressed", S.paused); $("updPill").textContent = S.paused ? "auto-refresh paused" : $("updPill").textContent; };
-["flClass", "flMal", "flLimit"].forEach(i => $(i).addEventListener("change", () => refresh(true)));
+["flClass", "flMal", "flLimit", "flLab"].forEach(i => $(i).addEventListener("change", () => refresh(true)));
 $("flSrc").addEventListener("change", () => refresh(true));
 ["thClass", "thConf"].forEach(i => $(i).addEventListener("change", () => refresh(true)));
 $("winChanged").addEventListener("change", () => refresh(true));

@@ -14,7 +14,7 @@ from typing import Any
 import tempfile
 
 from live import allowlist as allow
-from live import flowcontext
+from live import flowcontext, labsources
 from live.behavior import flow_bursts
 from live.cicflowmeter import convert_pcap
 from live.config import get_path, load_config
@@ -80,6 +80,7 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
             fields["flows"] = len(flows)
             pred = predictor.predict_frame(flows, capture_file=Path(conv.csv).name, source="pcap")
             pred = allow.get(cfg).apply(pred)
+            pred = labsources.tag(pred, labsources.get(cfg))
         except (SchemaError, ValueError) as e:
             db.upsert_capture(conn, pcap.name, status="failed", error=f"prediction: {e}", **fields)
             summary.update(status="failed", error=str(e))
@@ -106,6 +107,7 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
     summary.update(
         status="classified", detections=stored, malicious=int(pred["is_malicious"].sum()) if len(pred) else 0,
         allowlisted=int(pred["allowlisted"].notna().sum()) if len(pred) else 0,
+        lab_flows=pred["lab_scenario"].value_counts().to_dict() if len(pred) else {},
         dropped_non_ip=int(predictor.last_report.get("dropped_non_ip", 0)),
         classes=pred["predicted_class"].value_counts().to_dict() if len(pred) else {},
         prediction_ms=predictor.last_report["batch_ms"], pipeline_s=fields["pipeline_s"])

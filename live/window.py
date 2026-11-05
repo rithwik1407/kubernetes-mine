@@ -9,6 +9,12 @@ function of measured evidence, so it is deterministic, testable and logged:
            ML flows at or above the evidence confidence, and flow bursts.
 
   rules (first match wins)
+    R0 backlog     scoring cannot keep up: windows are waiting in the queue, or the
+                   last window took longer to convert and score than the current
+                   window lasts -> grow to the smallest size that is at least that
+                   processing time (one size larger at minimum). Without this, an
+                   attack (R1/R2 shrink to 1-3 s) makes every window take ~2 s to
+                   score, the queue grows without bound, and flows show up minutes late.
     R1 threat      threat evidence in the latest scored window
                    -> go to `threat_seconds` (default 3 s) if the current window is
                       longer, so the attack is re-observed and re-scored sooner.
@@ -42,6 +48,8 @@ class Evidence:
     top_class: str | None = None
     max_confidence: float | None = None
     calm_streak: int = 0              # consecutive scored windows without threat evidence
+    backlog: int = 0                  # captured windows still waiting to be scored
+    processing_s: float | None = None # how long converting + scoring the last window took
     scored_window: str | None = None  # which PCAP the threat evidence came from
 
     @property
@@ -98,6 +106,13 @@ def snap(value: float, sizes: list[float]) -> float:
     return min(sizes, key=lambda s: (abs(s - value), s))
 
 
+def _floor(ev: Evidence, sizes: list[float], cur: float) -> float:
+    """Never shrink below the time the last window took to score (it could not keep up)."""
+    if ev.processing_s is None:
+        return sizes[0]
+    return min(next((s for s in sizes if s >= ev.processing_s), sizes[-1]), cur)
+
+
 def decide(current_s: float, ev: Evidence, wcfg: dict[str, Any]) -> Decision:
     sizes = window_sizes(wcfg)
     cur = snap(float(current_s), sizes)
@@ -108,6 +123,14 @@ def decide(current_s: float, ev: Evidence, wcfg: dict[str, Any]) -> Decision:
     evd = ev.to_dict()
     rate_txt = "rate unknown" if pps is None else f"{pps:.1f} pkt/s"
 
+    slow = ev.processing_s is not None and ev.processing_s > cur
+    if ev.backlog >= 2 or slow:
+        need = max(ev.processing_s or 0.0, 0.0)
+        nxt = next((s for s in sizes if s >= need and s > cur), sizes[min(i + 1, len(sizes) - 1)])
+        return Decision(cur, nxt, "R0_backlog",
+                        f"scoring is behind ({ev.backlog} window(s) queued, last took "
+                        f"{(ev.processing_s or 0):.1f}s for a {cur:g}s window) -> "
+                        + (f"grow to {nxt:g}s so it can catch up" if nxt != cur else f"already at maximum {cur:g}s"), evd)
     if ev.threat:
         what = []
         if ev.malicious_flows:
@@ -116,12 +139,12 @@ def decide(current_s: float, ev: Evidence, wcfg: dict[str, Any]) -> Decision:
         if ev.bursts:
             what.append(f"{ev.bursts} flow burst(s)")
         tgt = snap(float(wcfg.get("threat_seconds", sizes[0])), sizes)
-        nxt = min(cur, tgt)
+        nxt = max(min(cur, tgt), _floor(ev, sizes, cur))
         return Decision(cur, nxt, "R1_threat",
                         f"threat evidence in {ev.scored_window or 'last scored window'} ({'; '.join(what)}) -> "
                         + (f"shrink to {nxt:g}s for faster re-detection" if nxt != cur else f"stay at {cur:g}s"), evd)
     if pps is not None and pps >= high:
-        nxt = sizes[max(i - 1, 0)]
+        nxt = max(sizes[max(i - 1, 0)], _floor(ev, sizes, cur))
         return Decision(cur, nxt, "R2_high_rate",
                         f"{rate_txt} >= high_rate_pps {high:g} -> "
                         + (f"shrink to {nxt:g}s" if nxt != cur else f"already at minimum {cur:g}s"), evd)

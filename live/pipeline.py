@@ -126,6 +126,11 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
         except TrafficLabError as e:
             errors.append({"scenario": sc, "target": tgt, "error": str(e)})
     if not jobs:   # nothing launched: surface the first error to the API (400/503)
+        if capture_started:      # and do not leave a capture running for a run that never started
+            try:
+                cap.stop(cfg)
+            except Exception:  # noqa: BLE001
+                log.warning("could not stop the capture started for a run that launched no Job")
         raise TrafficLabError(errors[0]["error"] if errors else "nothing to launch")
     first = jobs[0]
     run = {"id": run_id, "started_at": started, "jobs": jobs, "launch_errors": errors,

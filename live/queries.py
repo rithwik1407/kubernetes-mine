@@ -21,8 +21,13 @@ def _q(sql: str, params: tuple = (), cfg=None) -> list[dict[str, Any]]:
 
 
 def detections(limit=200, offset=0, source=None, predicted_class=None, src_ip=None,
-               malicious=None, cfg=None) -> list[dict[str, Any]]:
+               malicious=None, cfg=None, lab_scenario=None) -> list[dict[str, Any]]:
     where, params = ["simulated = 0"], []
+    if lab_scenario == "any":
+        where.append("lab_scenario IS NOT NULL")
+    elif lab_scenario:
+        where.append("lab_scenario = ?")
+        params.append(lab_scenario)
     for col, val in (("source", source), ("predicted_class", predicted_class), ("src_ip", src_ip)):
         if val:
             where.append(f"{col} = ?")
@@ -111,7 +116,7 @@ def recent_events(limit=50, cfg=None) -> list[dict[str, Any]]:
             "SELECT created_at ts, 'deception' kind, action || ' ' || COALESCE(decoy_name, '') title, src_ip, NULL dst_ip, "
             "NULL dst_port, evidence_count n, max_confidence confidence, result capture_file, trigger, action, "
             "attack_class, reason, evidence FROM decisions "
-            "WHERE action IN ('deploy','scale','remove','redirect','release','suppress_limit','suppress_cooldown') "
+            "WHERE action IN ('deploy','scale','remove','engage','redirect','release','suppress_limit','suppress_cooldown') "
             "ORDER BY id DESC LIMIT ?"), (int(limit),)))
     for d in dec:
         try:
