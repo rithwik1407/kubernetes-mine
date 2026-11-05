@@ -47,7 +47,9 @@ GET_OK = ["/", "/scorer", "/api/features", "/api/metrics", "/api/model", "/api/m
           "/api/pipeline/preflight", "/api/pipeline/status", "/api/deception/status", "/api/deception/policy",
           "/api/deception/decisions", "/api/deception/decoys", "/api/deception/interactions",
           "/api/deception/test-events", "/api/kubernetes/status", "/api/system/health", "/api/system/resources",
-          "/api/system/logs", "/api/system/requests", "/api/trafficlab/baseline"]
+          "/api/system/logs", "/api/system/requests", "/api/trafficlab/baseline",
+          "/api/live/activity?minutes=5&bucket=10", "/api/deception/detection-policy", "/api/deception/engagements",
+          "/api/live/allowlist"]
 
 
 @pytest.mark.parametrize("path", GET_OK)
@@ -69,6 +71,13 @@ def test_no_cluster_is_reported_not_hidden(client):
     ("post", "/api/pipeline/run", {"scenario": "nope"}, 400),
     ("post", "/api/pipeline/run", {"scenario": "port_scan", "count": 0}, 422),
     ("post", "/api/pipeline/run", {"scenario": "port_scan", "delay": 99}, 422),
+    ("post", "/api/pipeline/run", {"scenarios": ["port_scan", "nope"]}, 400),
+    ("post", "/api/pipeline/run", {"scenarios": []}, 422),
+    ("post", "/api/pipeline/run", {"scenarios": ["port_scan"], "targets": ["grafana"]}, 503),   # no cluster
+    ("put", "/api/deception/detection-policy", {}, 422),
+    ("put", "/api/deception/detection-policy", {"classes": {"PortScan": {"min_confidence": 2}}}, 400),
+    ("put", "/api/deception/detection-policy", {"classes": {"Nope": {"min_flows": 3}}}, 400),
+    ("get", "/api/live/activity?minutes=0", None, 422),
     ("post", "/api/trafficlab/launch", {"scenario": "port_scan"}, 503),       # no cluster
     ("get", "/api/trafficlab/jobs", None, 503),
     ("get", "/api/trafficlab/jobs/Bad_Name", None, 400),
@@ -135,3 +144,12 @@ def test_simulated_event_is_stored_separately(client):
     r = client.post("/api/deception/test-event", json={"attack_class": "DoS", "confidence": 0.95})
     assert r.status_code == 201 and r.json()["simulated"] is True
     assert client.get("/api/live/metrics").json()["total_flows"] == 0
+
+
+def test_detection_policy_roundtrip(client):
+    r = client.put("/api/deception/detection-policy", json={"classes": {"WebAttack": {"min_flows": 4}},
+                                                             "hysteresis": {"quiet_seconds": 90}})
+    assert r.status_code == 200 and r.json()["classes"]["WebAttack"]["min_flows"] == 4
+    assert r.json()["hysteresis"]["quiet_seconds"] == 90
+    r = client.put("/api/deception/detection-policy", json={"reset": True})
+    assert r.status_code == 200 and not r.json()["overridden"]

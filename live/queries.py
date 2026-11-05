@@ -106,10 +106,20 @@ def recent_events(limit=50, cfg=None) -> list[dict[str, Any]]:
         bursts = _records(db.query_df(c, (
             "SELECT detected_at ts, alert_type kind, CASE alert_type WHEN 'port_sweep' THEN 'Port sweep (' || distinct_ports || ' ports)' ELSE 'Flow burst' END title, src_ip, dst_ip, dst_port, flows n, "
             "NULL confidence, capture_file FROM behavior_alerts ORDER BY id DESC LIMIT ?"), (int(limit),)))
+        # every deception decision that changes something or is refused: trigger, evidence, confidence, action
         dec = _records(db.query_df(c, (
             "SELECT created_at ts, 'deception' kind, action || ' ' || COALESCE(decoy_name, '') title, src_ip, NULL dst_ip, "
-            "NULL dst_port, evidence_count n, max_confidence confidence, result capture_file FROM decisions "
-            "WHERE action IN ('deploy','scale','remove') ORDER BY id DESC LIMIT ?"), (int(limit),)))
+            "NULL dst_port, evidence_count n, max_confidence confidence, result capture_file, trigger, action, "
+            "attack_class, reason, evidence FROM decisions "
+            "WHERE action IN ('deploy','scale','remove','redirect','release','suppress_limit','suppress_cooldown') "
+            "ORDER BY id DESC LIMIT ?"), (int(limit),)))
+    for d in dec:
+        try:
+            e = json.loads(d.pop("evidence") or "{}")
+        except ValueError:
+            e = {}
+        d["evidence_flows"] = (e.get("detection_ids") or [])[:10]
+        d["mean_confidence"] = e.get("mean_confidence")
     ev = sorted(det + bursts + dec, key=lambda r: r["ts"] or "", reverse=True)
     return ev[:limit]
 
@@ -120,6 +130,63 @@ def traffic_timeline(minutes=30, cfg=None) -> list[dict[str, Any]]:
     return _q("SELECT c.started_at, c.ended_at, c.window_s, c.duration_s, c.packets, c.bytes, c.flows, c.status, "
               "(SELECT COUNT(*) FROM detections d WHERE d.capture_id = c.id AND d.is_malicious = 1) malicious "
               "FROM captures c WHERE c.started_at >= ? ORDER BY c.id", (since,), cfg)
+
+
+def activity(minutes: int = 15, bucket_s: int = 30, cfg=None) -> dict[str, Any]:
+    """Overview chart data: benign / malicious flows per fixed time bucket, capture coverage
+    per bucket (so gaps show as "capture off", not as zero traffic) and malicious events."""
+    now = datetime.now(timezone.utc)
+    start = now - timedelta(minutes=int(minutes))
+    start = start - timedelta(seconds=start.timestamp() % bucket_s)          # align to bucket edges
+    n = int((now - start).total_seconds() // bucket_s) + 1
+    edges = [start + timedelta(seconds=i * bucket_s) for i in range(n)]
+    since = start.isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        caps = [dict(r) for r in c.execute(
+            "SELECT id, started_at, ended_at, packets FROM captures WHERE ended_at >= ? ORDER BY id", (since,))]
+        det = [dict(r) for r in c.execute(
+            "SELECT d.capture_id, d.is_malicious, COUNT(*) n FROM detections d JOIN captures c ON c.id = d.capture_id "
+            "WHERE d.simulated = 0 AND c.ended_at >= ? GROUP BY d.capture_id, d.is_malicious", (since,))]
+        mal = _records(db.query_df(c, (
+            "SELECT c.started_at, c.ended_at, d.predicted_class, d.src_ip, d.dst_ip, d.dst_port, COUNT(*) n, "
+            "MAX(d.confidence) confidence FROM detections d JOIN captures c ON c.id = d.capture_id "
+            "WHERE d.simulated = 0 AND d.is_malicious = 1 AND c.ended_at >= ? "
+            "GROUP BY d.capture_id, d.src_ip, d.dst_ip, d.predicted_class ORDER BY c.ended_at"), (since,)))
+        alerts = _records(db.query_df(c, (
+            "SELECT detected_at, alert_type, src_ip, dst_ip, dst_port, flows, distinct_ports FROM behavior_alerts "
+            "WHERE detected_at >= ? ORDER BY id"), (since,)))
+    per_cap = {}
+    for d in det:
+        per_cap.setdefault(d["capture_id"], [0, 0])[1 if d["is_malicious"] else 0] += d["n"]
+    benign = [0] * n
+    malicious = [0] * n
+    covered = [0.0] * n
+    packets = [0] * n
+
+    def idx(t: datetime) -> int:
+        return max(0, min(n - 1, int((t - start).total_seconds() // bucket_s)))
+
+    for cp in caps:
+        try:
+            t0 = datetime.fromisoformat(cp["started_at"])
+            t1 = datetime.fromisoformat(cp["ended_at"])
+        except (TypeError, ValueError):
+            continue
+        b, m = per_cap.get(cp["id"], [0, 0])
+        k = idx(t1)                                   # flows are attributed to the bucket the window closed in
+        benign[k] += b
+        malicious[k] += m
+        packets[k] += cp["packets"] or 0
+        for i in range(idx(t0), idx(t1) + 1):         # capture coverage, seconds per bucket
+            lo, hi = edges[i], edges[i] + timedelta(seconds=bucket_s)
+            covered[i] += max(0.0, (min(hi, t1) - max(lo, t0)).total_seconds())
+    buckets = [{"t": edges[i].isoformat(), "benign": benign[i], "malicious": malicious[i], "packets": packets[i],
+                "capture_on": covered[i] >= 0.2 * bucket_s or bool(benign[i] or malicious[i])} for i in range(n)]
+    if buckets and not buckets[-1]["capture_on"] and (now - edges[-1]).total_seconds() < bucket_s:
+        buckets[-1]["capture_on"] = None              # current, still filling: unknown rather than off
+    return {"minutes": int(minutes), "bucket_seconds": int(bucket_s), "start": start.isoformat(), "end": now.isoformat(),
+            "buckets": buckets, "events": [{**e, "t": e["ended_at"]} for e in mal],
+            "alerts": [{**a, "t": a["detected_at"]} for a in alerts]}
 
 
 def behavior_alerts(limit=200, cfg=None) -> list[dict[str, Any]]:

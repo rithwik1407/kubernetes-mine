@@ -78,6 +78,27 @@ nav .badge { margin-left: auto; font-size: 11px; background: var(--critical); co
 .kpi .value { font-size: 26px; font-weight: 650; letter-spacing: -.01em; margin-top: 4px; font-variant-numeric: tabular-nums; line-height: 1.15; }
 .kpi .foot { color: var(--muted); font-size: 12px; margin-top: 2px; min-height: 18px; }
 .na { color: var(--muted); font-size: 15px; font-weight: 500; }
+/* Overview stat cards: equal heights, unit suffixes, footers aligned to the bottom */
+#ovKpis { grid-template-columns: repeat(auto-fill, minmax(170px, 1fr)); grid-auto-rows: 1fr; }
+#ovKpis .kpi { display: flex; flex-direction: column; min-height: 112px; }
+#ovKpis .kpi .label { min-height: 18px; line-height: 1.3; }
+#ovKpis .kpi .value { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+#ovKpis .kpi .unit { font-size: 14px; font-weight: 500; color: var(--muted); margin-left: 3px; letter-spacing: 0; }
+#ovKpis .kpi .foot { margin-top: auto; padding-top: 6px; line-height: 1.35; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+.picks { border: 1px solid var(--border); border-radius: 8px; padding: 6px 10px 8px; margin: 0; }
+.picks legend { padding: 0 4px; color: var(--muted); font-size: 12px; }
+.picklist { display: flex; flex-direction: column; gap: 3px; max-height: 210px; overflow: auto; }
+.picklist label { display: flex; gap: 8px; align-items: baseline; color: var(--text); font-size: 13px; cursor: pointer; }
+.picklist label small { color: var(--muted); font-size: 11.5px; }
+.picklist input, .field.check input { accent-color: var(--accent); }
+.field.check { justify-content: flex-end; padding-bottom: 22px; } .field.check span { display: flex; gap: 6px; align-items: center; color: var(--text-2); font-size: 12.5px; }
+.tip { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--border-2); color: var(--muted); font-size: 10px; cursor: help; margin-left: 2px; }
+.tip:focus-visible { outline: 2px solid var(--accent); }
+.seg { display: inline-flex; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
+.seg button { background: var(--surface-2); color: var(--text-2); border: 0; padding: 5px 11px; font-size: 12px; cursor: pointer; }
+.seg button + button { border-left: 1px solid var(--border-2); }
+.seg button.on { background: var(--accent-soft); color: var(--text); box-shadow: inset 0 -2px 0 var(--accent); }
+.seg button:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
 .btn { display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--border-2); background: var(--surface-2); color: var(--text);
   padding: 7px 12px; border-radius: 8px; cursor: pointer; font-size: 13px; line-height: 1.2; white-space: nowrap; }
 .btn:hover:not(:disabled) { background: var(--surface-3); }
@@ -210,7 +231,8 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <section class="page" id="p-overview" data-title="Overview" data-sub="Everything here is measured by the backend; '—' means not measured yet">
     <div class="grid kpis" id="ovKpis"><div class="loading">Loading metrics…</div></div>
     <div class="grid two" style="margin-top:14px">
-      <div class="card"><div class="card-head"><div><h2>Network activity per capture window</h2><p class="hint">Packets captured in each window (last 30 min). Malicious flows are drawn as markers.</p></div></div><div id="ovActivity" class="chart"></div></div>
+      <div class="card"><div class="card-head"><div><h2>Network activity</h2><p class="hint" id="ovActHint">Scored flows per 30 s interval. Shaded: capture off. Markers: malicious detections and behaviour alerts (hover for details).</p></div>
+        <div class="seg" role="group" aria-label="Time range"><button data-range="5">5 min</button><button data-range="15" class="on">15 min</button><button data-range="30">30 min</button></div></div><div id="ovActivity" class="chart"></div></div>
       <div class="card"><div class="card-head"><div><h2>Recent security events</h2><p class="hint">Malicious detections, flow bursts / port sweeps and decoy actions</p></div></div><ul class="feed" id="ovEvents"><li class="loading">Loading…</li></ul></div>
     </div>
     <div class="grid two" style="margin-top:14px">
@@ -270,12 +292,17 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <section class="page" id="p-lab" data-title="Traffic lab" data-sub="Bounded, labelled traffic Jobs against the lab's own services only">
     <div class="grid two">
       <div class="card">
-        <h2>Generate traffic</h2><p class="hint">Runs one Kubernetes Job in <code>ids-traffic</code>. "Generate &amp; capture" also starts packet capture so the traffic is scored automatically.</p>
-        <form id="labForm" class="form" novalidate>
-          <label class="field">Scenario<select id="labScenario" required></select><span class="err"></span></label>
-          <label class="field">Target<select id="labTarget"></select><span class="err"></span></label>
-          <label class="field">Count (1–5000)<input id="labCount" type="number" min="1" max="5000" value="300" required><span class="err"></span></label>
-          <label class="field">Delay s (0–10)<input id="labDelay" type="number" min="0" max="10" step="0.01" value="0.05" required><span class="err"></span></label>
+        <h2>Generate traffic</h2><p class="hint">One bounded Kubernetes Job in <code>ids-traffic</code> per selected attack × target, launched together and each labelled with its expected class. "Generate &amp; capture" also starts packet capture so the traffic is scored automatically.</p>
+        <form id="labForm" novalidate>
+          <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(min(100%,220px),1fr));gap:12px">
+            <fieldset class="field picks"><legend>Attack types</legend><div id="labScenarios" class="picklist"></div><span class="err" id="labScErr"></span></fieldset>
+            <fieldset class="field picks"><legend>Target pods / services</legend><div id="labTargets" class="picklist"></div><span class="err" id="labTgErr"></span></fieldset>
+          </div>
+          <div class="form" style="margin-top:10px">
+            <label class="field"><span>Count <span class="tip" tabindex="0" title="How many requests, login attempts or slow connections each Job makes (1–5000). Port scan ignores it and scans its configured port range (1–1024). More = a longer, louder run. Leave empty to use each attack's default.">?</span></span><input id="labCount" type="number" min="1" max="5000" placeholder="per-attack default"><span class="err"></span></label>
+            <label class="field"><span>Delay (s) <span class="tip" tabindex="0" title="Seconds the generator waits between two requests (0–10). 0 = as fast as possible. Smaller delays mean more flows per capture window, which is what the burst / port-sweep detectors look for. Leave empty to use each attack's default.">?</span></span><input id="labDelay" type="number" min="0" max="10" step="0.01" placeholder="per-attack default"><span class="err"></span></label>
+            <label class="field check"><span><input id="labAutoStop" type="checkbox" checked> Stop capture when done <span class="tip" tabindex="0" title="When every Job of the run has finished (succeeded or failed), wait a short drain period so the last capture window is scored, then stop capture automatically. The Stop button on Live Traffic still overrides it.">?</span></span></label>
+          </div>
         </form>
         <p class="hint" id="labDesc" style="margin-top:4px"></p>
         <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="labRun">Generate &amp; capture</button><button class="btn" id="labLaunch">Launch only</button></div>
@@ -298,6 +325,10 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
     <div class="card"><div class="card-head"><div><h2>Controller</h2><p class="hint" id="decHint">—</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="decEnable">Enable automatic deception</button><button class="btn" id="decDisable">Disable</button><button class="btn" id="decCycle">Run cycle now</button></div></div>
       <div class="grid kpis" id="decKpis"></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detection thresholds</h2><p class="hint">When ML detections trigger a decoy + redirect: per attack class, at least <b>N flows</b> from one source, each ≥ <b>min confidence</b>, within <b>T seconds</b>, with <b>mean confidence</b> ≥ X. A single flow never triggers. Control-plane traffic (API server, kubelet, kube-system) is never acted on.</p></div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" id="polSave">Save thresholds</button><button class="btn small" id="polReset">Reset to defaults</button></div></div>
+      <form id="polForm" novalidate><div id="polTable"><div class="loading">Loading…</div></div></form>
+      <div id="polEng" style="margin-top:12px"></div></div>
     <div class="grid two" style="margin-top:14px">
       <div class="card"><div class="card-head"><div><h2>Decoys in Kubernetes</h2><p class="hint">Live from the API: ready replicas and Service endpoints. "Active" requires both.</p></div>
         <div style="display:flex;gap:6px;align-items:center"><select id="decProfile" aria-label="Decoy profile" class="btn"></select><button class="btn small" id="decDeploy">Deploy</button></div></div>
@@ -480,8 +511,53 @@ async function loadChrome() {
 }
 
 /* ---------------- A. Overview ---------------- */
+function drawActivity(act) {
+  const bs = act.buckets || [], bucket = act.bucket_seconds;
+  $("ovActHint").textContent = `Scored flows per ${bucket} s interval, last ${act.minutes} min. Shaded: capture off. Markers: malicious detections and behaviour alerts (hover for details).`;
+  const anyData = bs.some(b => b.benign || b.malicious) || (act.alerts || []).length;
+  if (!anyData && !bs.some(b => b.capture_on)) { plot("ovActivity", null, null, `No capture in the last ${act.minutes} minutes`); return; }
+  // bucket centre so a value sits in the middle of its interval
+  const mid = b => new Date(new Date(b.t).getTime() + bucket * 500);
+  const on = b => b.capture_on !== false;
+  const x = bs.map(mid);
+  const benign = bs.map(b => on(b) ? b.benign : null), mal = bs.map(b => on(b) ? b.malicious : null);
+  const ymax = Math.max(1, ...bs.map(b => b.benign + b.malicious));
+  const shapes = [], ann = [];
+  for (let i = 0; i < bs.length; i++) {          // contiguous "capture off" runs
+    if (bs[i].capture_on !== false) continue;
+    let j = i; while (j + 1 < bs.length && bs[j + 1].capture_on === false) j++;
+    const x0 = new Date(bs[i].t), x1 = new Date(new Date(bs[j].t).getTime() + bucket * 1000);
+    shapes.push({ type: "rect", xref: "x", yref: "paper", x0, x1, y0: 0, y1: 1, fillcolor: cssVar("--surface-3"), opacity: 0.55, line: { width: 0 }, layer: "below" });
+    if (j - i + 1 >= Math.max(3, bs.length / 12)) ann.push({ x: new Date((x0.getTime() + x1.getTime()) / 2), y: 1, yref: "paper", yanchor: "top", text: "capture off", showarrow: false, font: { size: 11, color: cssVar("--muted") } });
+    i = j;
+  }
+  const ev = act.events || [], al = act.alerts || [];
+  const bucketOf = t => { const k = Math.floor((new Date(t) - new Date(act.start)) / (bucket * 1000)); return bs[Math.max(0, Math.min(bs.length - 1, k))]; };
+  const traces = [
+    { type: "scatter", mode: "lines", name: "Benign flows", x, y: benign, connectgaps: false, line: { color: cssVar("--c-benign"), width: 2, shape: "linear" },
+      fill: "tozeroy", fillcolor: "rgba(111,110,105,.18)", hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} benign flows<extra></extra>" },
+    { type: "scatter", mode: "lines", name: "Malicious flows (model)", x, y: mal, connectgaps: false, line: { color: cssVar("--critical"), width: 2 },
+      hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} malicious flows<extra></extra>" },
+    { type: "scatter", mode: "markers", name: "Malicious detection", x: ev.map(e => mid(bucketOf(e.t))), y: ev.map(e => (bucketOf(e.t) || {}).malicious || 0),
+      marker: { color: cssVar("--critical"), size: 10, symbol: "diamond", line: { color: cssVar("--surface"), width: 2 } },
+      customdata: ev.map(e => [e.predicted_class, `${e.src_ip} → ${e.dst_ip}:${e.dst_port ?? ""}`, e.n, (+e.confidence).toFixed(2), new Date(e.t).toLocaleTimeString()]),
+      hovertemplate: "<b>%{customdata[0]}</b> · %{customdata[4]}<br>%{customdata[1]}<br>%{customdata[2]} flow(s), max confidence %{customdata[3]}<extra></extra>" },
+    { type: "scatter", mode: "markers", name: "Behaviour alert", x: al.map(a => mid(bucketOf(a.t))), y: al.map(() => ymax * 1.08),
+      marker: { color: cssVar("--warning"), size: 9, symbol: "triangle-down", line: { color: cssVar("--surface"), width: 1.5 } },
+      customdata: al.map(a => [a.alert_type === "port_sweep" ? `Port sweep (${a.distinct_ports} ports)` : "Flow burst", `${a.src_ip} → ${a.dst_ip}${a.dst_port ? ":" + a.dst_port : ""}`, a.flows, new Date(a.t).toLocaleTimeString()]),
+      hovertemplate: "<b>%{customdata[0]}</b> · %{customdata[3]}<br>%{customdata[1]}<br>%{customdata[2]} flows<extra></extra>" },
+    { type: "scatter", mode: "markers", name: "Capture off", x: [null], y: [null], marker: { symbol: "square", size: 12, color: cssVar("--surface-3") }, hoverinfo: "skip" },
+  ];
+  plot("ovActivity", traces, {
+    showlegend: true, legend: { orientation: "h", y: -0.2, x: 0, font: { size: 11, color: cssVar("--text-2") } },
+    margin: { l: 48, r: 12, t: 10, b: 64 }, shapes, annotations: ann, hovermode: "closest",
+    xaxis: Object.assign(layout().xaxis, { type: "date", range: [new Date(act.start), new Date(act.end)], tickformat: act.minutes <= 5 ? "%H:%M:%S" : "%H:%M", nticks: 7, showgrid: false }),
+    yaxis: Object.assign(layout().yaxis, { title: { text: `flows / ${bucket} s`, font: { size: 11 } }, range: [0, ymax * 1.18], fixedrange: true }),
+  });
+}
 async function pageOverview(full) {
-  const [m, ev, st, tl] = await Promise.all([api("/api/live/metrics"), api("/api/live/events?limit=40"), api("/api/live/stats"), api("/api/live/timeline?minutes=30")]);
+  const range = S.ovRange || 15, bucket = { 5: 10, 15: 30, 30: 60 }[range] || 30;
+  const [m, ev, st, act] = await Promise.all([api("/api/live/metrics"), api("/api/live/events?limit=40"), api("/api/live/stats"), api(`/api/live/activity?minutes=${range}&bucket=${bucket}`)]);
   if (full || !S.res || S.slow % 3 === 0) {
     [S.res, S.k8s] = await Promise.all([api("/api/system/resources").catch(e => ({ error: e.message })), api("/api/kubernetes/status").catch(e => ({ connected: false, error: e.message }))]);
   }
@@ -493,32 +569,24 @@ async function pageOverview(full) {
   }
   const lat = m.detection_latency_s || {};
   const node = r.cluster && r.cluster.available ? r.cluster.nodes[0] : null;
+  const u = (v, unit) => `${v}<span class="unit">${unit}</span>`;
   $("ovKpis").innerHTML = [
     kpi("Total network flows", fmt(m.total_flows), `${fmt(m.captures)} capture windows`),
-    kpi("Packets captured", fmt(m.packets_captured), `${fmt((m.bytes_captured || 0) / 1048576, 1)} MB`),
-    kpi("Benign flows", fmt(m.benign_flows)),
+    kpi("Packets captured", fmt(m.packets_captured), `${fmt((m.bytes_captured || 0) / 1048576, 1)} MB in all windows`),
+    kpi("Benign flows", fmt(m.benign_flows), "scored BENIGN by the model"),
     kpi("Malicious flows", fmt(m.malicious_flows), `${fmt(m.flow_bursts)} behaviour alerts`, m.malicious_flows ? "error" : null),
-    kpi("Threat detection rate", m.malicious_rate === null ? NA : pct(m.malicious_rate, 2), "share of scored flows flagged malicious"),
-    kpi("Observation window", m.current_window_s ? fmt(m.current_window_s) + " s" : NA, m.capture_running ? "capture running" : "capture not running", m.capture_running ? "ok" : "idle"),
+    kpi("Threat detection rate", m.malicious_rate === null ? NA : u(fmt(m.malicious_rate * 100, 2), "%"), "share of scored flows flagged malicious"),
+    kpi("Observation window", m.current_window_s ? u(fmt(m.current_window_s), "s") : NA, m.capture_running ? "capture running" : "capture not running", m.capture_running ? "ok" : "idle"),
     kpi("Active pods", pods === null ? NA : fmt(pods), k.connected ? "running, lab namespaces" : esc((k.error || "cluster unreachable").slice(0, 60))),
     kpi("Active decoy pods", decoyPods === null ? NA : fmt(decoyPods), `${fmt(m.active_decoys)} decoy(s) tracked`),
-    kpi("Detection latency", lat.last_s === null || lat.last_s === undefined ? NA : fmt(lat.last_s, 2) + " s", lat.samples ? `mean ${fmt(lat.mean_s, 2)} s · model ${fmt(lat.model_ms_mean, 1)} ms/window` : "window end → stored detections"),
-    kpi("Host CPU / memory", r.host ? `${fmt(r.host.load_1m, 2)} <span class="na">load</span>` : NA, r.host ? `${r.host.cpus} CPUs · memory ${fmt(r.host.memory_percent, 0)}% used` : "not measurable on this OS"),
-    kpi("Node CPU / memory", node ? `${fmt(node.cpu_cores, 2)} <span class="na">cores</span>` : NA, node ? `${fmt(node.memory_mb)} MiB (metrics-server)` : esc(((r.cluster || {}).error || "metrics-server unavailable").slice(0, 60))),
+    kpi("Detection latency", lat.last_s === null || lat.last_s === undefined ? NA : u(fmt(lat.last_s, 2), "s"), lat.samples ? `mean ${fmt(lat.mean_s, 2)} s · model ${fmt(lat.model_ms_mean, 1)} ms/window` : "window end → stored detections"),
+    kpi("Host load", r.host ? u(fmt(r.host.load_1m, 2), "load 1m") : NA, r.host ? `${r.host.cpus} CPUs · memory ${fmt(r.host.memory_percent, 0)}% used` : "not measurable on this OS"),
+    kpi("Node CPU", node ? u(fmt(node.cpu_cores, 2), "cores") : NA, node ? `memory ${fmt(node.memory_mb)} MiB (metrics-server)` : esc(((r.cluster || {}).error || "metrics-server unavailable").slice(0, 60))),
   ].join("");
-  // activity
-  if (tl.length) {
-    const x = tl.map(w => new Date(w.started_at)), mal = tl.map(w => w.malicious);
-    plot("ovActivity", [
-      { type: "bar", x, y: tl.map(w => w.packets || 0), marker: { color: cssVar("--c-dos") }, name: "packets", hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} packets<extra></extra>" },
-      { type: "scatter", mode: "markers", x: x.filter((_, i) => mal[i] > 0), y: tl.filter(w => w.malicious > 0).map(w => w.packets || 0),
-        marker: { color: cssVar("--critical"), size: 10, symbol: "diamond", line: { color: cssVar("--surface"), width: 2 } }, name: "malicious",
-        customdata: tl.filter(w => w.malicious > 0).map(w => w.malicious), hovertemplate: "%{customdata} malicious flow(s)<extra></extra>" },
-    ], { yaxis: Object.assign(layout().yaxis, { title: { text: "packets", font: { size: 11 } } }) });
-  } else plot("ovActivity", null, null, "No capture windows in the last 30 minutes");
+  drawActivity(act);
   // events
   $("ovEvents").innerHTML = ev.length ? ev.map(e => `<li><span class="when">${time(e.ts)}</span><span class="what">${e.kind === "detection" ? clsTag(e.title) : `<b>${esc(e.title)}</b>`}
-    <span style="color:var(--muted)">${esc(e.src_ip || "")}${e.dst_ip ? " → " + esc(e.dst_ip) : ""}${e.dst_port ? ":" + esc(e.dst_port) : ""}${e.n ? " · " + fmt(e.n) + (e.kind === "detection" ? " flow(s)" : e.kind === "deception" ? " evidence" : " flows") : ""}${e.confidence ? " · conf " + fmt(e.confidence, 2) : ""}</span></span></li>`).join("")
+    <span style="color:var(--muted)">${esc(e.src_ip || "")}${e.dst_ip ? " → " + esc(e.dst_ip) : ""}${e.dst_port ? ":" + esc(e.dst_port) : ""}${e.n ? " · " + fmt(e.n) + (e.kind === "detection" ? " flow(s)" : e.kind === "deception" ? " evidence" : " flows") : ""}${e.confidence ? " · conf " + fmt(e.confidence, 2) : ""}</span>${e.kind === "deception" && e.reason ? `<span class="hint" style="display:block;margin:2px 0 0;white-space:normal">${esc(e.trigger || "")} → ${esc(e.action)} (${esc(e.capture_file || "")}): ${esc(e.reason.slice(0, 220))}${e.evidence_flows && e.evidence_flows.length ? ` · evidence flows #${e.evidence_flows.slice(0, 5).join(", #")}` : ""}</span>` : ""}</span></li>`).join("")
     : `<li>${empty("No security events yet", "Generate attack traffic from the Traffic lab.")}</li>`;
   // distribution + classes
   const byClass = {}; let ben = 0, mal = 0;
@@ -628,26 +696,38 @@ async function pageWindow() {
 async function loadScenarios() {
   if (S.scenarios) return;
   S.scenarios = await api("/api/trafficlab/scenarios");
-  const sel = $("labScenario"); sel.innerHTML = "";
-  Object.entries(S.scenarios.scenarios).forEach(([k, v]) => sel.add(new Option(`${k}${v.expect_class ? " (" + v.expect_class + ")" : ""}`, k)));
-  sel.value = "port_scan"; onScenario();
+  $("labScenarios").innerHTML = Object.entries(S.scenarios.scenarios).map(([k, v]) =>
+    `<label title="${esc(v.description)}"><input type="checkbox" name="labSc" value="${esc(k)}" ${k === "port_scan" ? "checked" : ""}> ${esc(k)} <small>${v.expect_class ? "expects " + esc(v.expect_class) : "no expected class"} · ${fmt(v.count)} × ${v.delay}s</small></label>`).join("");
+  $("labTargets").innerHTML = Object.entries(S.scenarios.targets).map(([k, v]) =>
+    `<label><input type="checkbox" name="labTg" value="${esc(k)}" ${k === "nodered" ? "checked" : ""}> ${esc(k)} <small>${esc(v.host.split(".")[0])}:${v.port}</small></label>`).join("");
+  document.querySelectorAll('input[name="labSc"]').forEach(c => c.addEventListener("change", onScenario));
+  onScenario();
 }
+const picked = name => [...document.querySelectorAll(`input[name="${name}"]:checked`)].map(c => c.value);
 function onScenario() {
-  const k = $("labScenario").value, sc = S.scenarios.scenarios[k], t = $("labTarget");
-  t.innerHTML = "";
-  if (sc.mode === "decoy_probe") { t.add(new Option("all active decoys", "")); }
-  else Object.keys(S.scenarios.targets).forEach(n => t.add(new Option(`${n} (:${S.scenarios.targets[n].port})`, n)));
-  if (sc.default_target) t.value = sc.default_target;
-  $("labDesc").textContent = sc.description + (sc.detectable ? "" : " (not expected to be flagged by the model)");
+  const sel = picked("labSc"), sc = S.scenarios.scenarios;
+  const one = sel.length === 1 ? sc[sel[0]] : null;
+  $("labCount").placeholder = one ? `default ${one.count}` : "per-attack default";
+  $("labDelay").placeholder = one ? `default ${one.delay}` : "per-attack default";
+  const tg = picked("labTg"), probes = sel.filter(k => sc[k].mode === "decoy_probe").length, jobs = (sel.length - probes) * Math.max(1, tg.length) + probes;
+  $("labDesc").textContent = !sel.length ? "Select at least one attack type." :
+    (one ? one.description + (one.detectable ? "" : " (not expected to be flagged by the model)") + ". " : "") +
+    `${jobs} Job(s) will run in parallel` + (probes ? "; decoy_probe always targets the active decoys" : "") + ".";
 }
 function labBody() {
   const f = $("labForm"); let ok = true;
   f.querySelectorAll(".err").forEach(e => e.textContent = "");
-  const c = $("labCount"), d = $("labDelay");
-  if (!c.checkValidity() || !Number.isInteger(+c.value)) { c.nextElementSibling.textContent = "whole number 1–5000"; ok = false; }
-  if (!d.checkValidity() || d.value === "") { d.nextElementSibling.textContent = "number 0–10"; ok = false; }
+  const c = $("labCount"), d = $("labDelay"), sc = picked("labSc"), tg = picked("labTg");
+  if (!sc.length) { $("labScErr").textContent = "select at least one attack type"; ok = false; }
+  const needsTarget = sc.some(k => S.scenarios.scenarios[k].mode !== "decoy_probe");
+  if (needsTarget && !tg.length) { $("labTgErr").textContent = "select at least one target"; ok = false; }
+  if (c.value !== "" && (!c.checkValidity() || !Number.isInteger(+c.value))) { c.nextElementSibling.textContent = "whole number 1–5000"; ok = false; }
+  if (d.value !== "" && !d.checkValidity()) { d.nextElementSibling.textContent = "number 0–10"; ok = false; }
   if (!ok) throw new ApiError(422, "Fix the highlighted fields");
-  return { scenario: $("labScenario").value, target: $("labTarget").value || null, count: +c.value, delay: +d.value };
+  const body = { scenarios: sc, targets: needsTarget ? tg : null, auto_stop: $("labAutoStop").checked };
+  if (c.value !== "") body.count = +c.value;
+  if (d.value !== "") body.delay = +d.value;
+  return body;
 }
 async function pageLab(full) {
   await loadScenarios();
@@ -661,14 +741,28 @@ async function pageLab(full) {
     : `<span id="baseState" class="pill s-warn"><span class="dot"></span>${esc((base.error || "unavailable").slice(0, 50))}</span>`;
   $("baseOn").disabled = !base.available || base.replicas > 0; $("baseOff").disabled = !base.available || !base.replicas;
   if (run.run) {
-    $("runHint").innerHTML = `${esc(run.run.scenario)} → ${esc(run.run.target)} · started ${ago(run.run.started_at)} · expected ${esc(run.run.expect_class || "n/a")}. ${esc(run.hint)}`;
+    const as = run.auto_stop || {};
+    $("runHint").innerHTML = `${esc(run.run.scenario)} → ${esc(run.run.target)} · started ${ago(run.run.started_at)} · ${fmt((run.jobs || []).length)} Job(s)` +
+      (as.enabled !== undefined || as.state ? ` · auto-stop: ${esc(as.state || "off")}${as.detail ? " (" + esc(as.detail) + ")" : ""}` : "") + `. ${esc(run.hint)}`;
     $("runSteps").innerHTML = run.stages.map(s => `<div class="step ${s.state}"><div class="t"><span class="dot ${stateCls(s.state)}"></span>${esc(s.label)}</div><div class="d">${esc(s.detail)}</div></div>`).join("");
     const bc = Object.entries(run.by_class || {});
-    $("runClasses").innerHTML = bc.length ? `<div class="hint">Model output for this run: ${bc.map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" &nbsp; ")} · behaviour alerts ${fmt(run.bursts)} · deception decisions ${fmt(run.decisions)}</div>` : "";
+    const fails = (run.jobs || []).filter(j => j.failure);
+    $("runClasses").innerHTML = fails.map(j => errBox(`${j.job} (${j.scenario} → ${j.target_label || j.target}) failed: ${j.failure.summary}`)).join("") +
+      ((run.run.launch_errors || []).map(e => errBox(`${e.scenario} → ${e.target || "default"} not launched: ${e.error}`)).join("")) +
+      (run.jobs && run.jobs.length ? `<h3 style="font-size:13px;margin:8px 0 6px">Expected vs predicted, per Job</h3>` + table([
+        { h: "Job", f: j => `<span class="mono">${esc(j.job)}</span>` }, { h: "Attack → target", f: j => `${esc(j.scenario)} → ${esc(j.target_label || j.target)}` },
+        { h: "State", f: j => pill(j.state, j.state) }, { h: "Expected", f: j => j.expect_class ? clsTag(j.expect_class) : "—" },
+        { h: "Flows", num: 1, f: j => fmt(j.breakdown.flows) },
+        { h: "Predicted", wrap: 1, f: j => Object.entries(j.breakdown.by_class || {}).sort((a, b) => b[1] - a[1]).map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" ") || `<span class="hint">${esc(j.breakdown.note || "no flows yet")}</span>` },
+        { h: "Detected as expected", num: 1, f: j => j.breakdown.accuracy == null ? "—" : pct(j.breakdown.accuracy, 1) },
+        { h: "Behaviour alerts", f: j => Object.entries(j.breakdown.behaviour_alerts || {}).map(([k, n]) => `${esc(k.replace("_", " "))} ${fmt(n)}`).join(", ") || "none" },
+      ], run.jobs, { maxH: "320px" }) : "") +
+      (bc.length ? `<div class="hint" style="margin-top:8px">All flows scored since the run started: ${bc.map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" &nbsp; ")} · behaviour alerts ${fmt(run.bursts)} · deception decisions ${fmt(run.decisions)}</div>` : "");
   }
   $("jobsTable").innerHTML = jobs.error ? errBox(jobs.error) : table([
     { h: "Job", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Scenario", k: "scenario" }, { h: "Target", f: r => `<span class="mono">${esc(r.target || "—")}</span>` },
-    { h: "State", f: r => pill(r.state, r.state) }, { h: "Started", f: r => ago(r.started) },
+    { h: "State", f: r => pill(r.state, r.state) + (r.failure ? `<div class="hint" style="margin:2px 0 0;white-space:normal;max-width:340px;color:var(--critical-ink)">${esc(r.failure)}</div>` : "") },
+    { h: "Expected", f: r => r.expect_class ? clsTag(r.expect_class) : "—" }, { h: "Started", f: r => ago(r.started) },
     { h: "", f: r => `<button class="btn small" data-job="${esc(r.name)}">Details</button> <button class="btn small danger" data-deljob="${esc(r.name)}">Delete</button>` },
   ], jobs, { emptyTitle: "No traffic Jobs", emptyBody: "Launch a scenario above." });
 }
@@ -680,8 +774,40 @@ async function showJob(name) {
       <dt>Verified</dt><dd>${v.verified ? pill("yes: target answered", "ok") : pill("no answered connections", "error")}</dd>
       <dt>Answered / failed</dt><dd>${fmt(v.ok)} / ${fmt(v.errors)} ${Object.keys(v.http_status).length ? "· HTTP " + esc(JSON.stringify(v.http_status)) : ""} ${Object.keys(v.error_types).length ? "· errors " + esc(JSON.stringify(v.error_types)) : ""}</dd>
       <dt>Actions</dt><dd>${esc(JSON.stringify(v.actions))}</dd></dl>
+      ${j.failure ? errBox(`Failed: ${j.failure.summary}`) + `<dl class="kv"><dt>Job condition</dt><dd>${esc(j.failure.job_reason || "—")}${j.failure.job_message ? ": " + esc(j.failure.job_message) : ""}</dd><dt>Exit</dt><dd>${j.failure.exit_code == null ? "no exit code (pod deleted)" : esc(j.failure.container_reason || "") + " · code " + esc(j.failure.exit_code)}</dd><dt>Time limit</dt><dd>${fmt(j.failure.deadline_seconds)} s</dd></dl>` : ""}
       ${j.log_error ? errBox(j.log_error) : ""}<div class="note" style="margin-top:10px;max-height:240px;overflow:auto"><pre class="log">${esc((j.log_tail || []).join("\n")) || "no log output yet"}</pre></div>`;
   } catch (e) { $("jdBody").innerHTML = errBox(e); }
+}
+
+/* ---------------- E. Deception: thresholds ---------------- */
+const POL_FIELDS = [["min_confidence", "Min confidence", 0.5, 1, 0.01], ["min_flows", "N flows", 1, 1000, 1], ["window_seconds", "Within T (s)", 5, 3600, 1], ["mean_confidence", "Mean confidence ≥", 0.5, 1, 0.01]];
+const HYS_FIELDS = [["release_ratio", "Hold while evidence ≥ (fraction of trigger)", 0.1, 1, 0.05], ["quiet_seconds", "Release after quiet (s)", 10, 7200, 1], ["reengage_cooldown_seconds", "Re-engage cooldown (s)", 0, 7200, 1]];
+function renderPolicy(st) {
+  const pol = st.detection_policy; if (!pol) return;
+  const form = $("polForm");
+  if (!S.polDirty && !form.contains(document.activeElement)) {
+    const rows = Object.entries(pol.classes).sort(([a], [b]) => a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b));
+    $("polTable").innerHTML = table([{ h: "Class", f: ([c]) => c === "default" ? "<i>default (other classes)</i>" : clsTag(c) },
+      ...POL_FIELDS.map(([k, label, lo, hi, step]) => ({ h: label, f: ([c, v]) => `<input class="polin" data-cls="${esc(c)}" data-k="${k}" type="number" min="${lo}" max="${hi}" step="${step}" value="${v[k]}" aria-label="${esc(c)} ${esc(label)}" style="width:92px">` }))],
+      rows, { maxH: "340px" }) +
+      `<div class="form" style="margin-top:10px">${HYS_FIELDS.map(([k, label, lo, hi, step]) => `<label class="field">${esc(label)}<input class="hysin" data-k="${k}" type="number" min="${lo}" max="${hi}" step="${step}" value="${pol.hysteresis[k]}"><span class="err"></span></label>`).join("")}</div>` +
+      `<p class="hint" style="margin-top:6px">${pol.overridden ? `Saved overrides in use (updated ${ago(pol.updated_at)}).` : "Defaults from config/live.yaml → deception.detection_policy."} Once a source triggers, it stays engaged (decoys up, redirected) while its evidence stays above the hold fraction; it is released, its redirect undone and its decoys torn down after the quiet period.</p>`;
+  }
+  const eng = st.engagements || [];
+  $("polEng").innerHTML = `<h3 style="font-size:13px;margin:0 0 6px">Engaged sources</h3>` + table([
+    { h: "#", num: 1, k: "id" }, { h: "Source", f: e => `<span class="mono">${esc(e.src_ip)}</span>` }, { h: "Class", f: e => CLASS_COLORS[e.attack_class] ? clsTag(e.attack_class) : esc(e.attack_class || "—") },
+    { h: "Since", f: e => ago(e.started_at) }, { h: "Last evidence", f: e => ago(e.last_evidence_at) },
+    { h: "Redirect", wrap: 1, f: e => (e.redirect || {}).applied ? pill("quarantined to decoys", "ok") + ` <span class="mono">${esc(e.redirect.namespace)}/${esc(e.redirect.pod)}</span>` : `<span class="hint">${esc((e.redirect || {}).reason || "—")}</span>` },
+    { h: "Decoys", f: e => esc((e.decoys || []).join(", ") || "—") },
+  ], eng, { emptyTitle: "No engaged sources", emptyBody: "A source is engaged when its evidence meets the thresholds above." });
+}
+function policyBody() {
+  let ok = true; const classes = {}, hysteresis = {};
+  document.querySelectorAll("#polForm input").forEach(i => { i.style.outline = ""; if (!i.checkValidity() || i.value === "") { i.style.outline = "2px solid var(--critical)"; ok = false; } });
+  if (!ok) throw new ApiError(422, "Some thresholds are out of range (highlighted)");
+  document.querySelectorAll(".polin").forEach(i => { (classes[i.dataset.cls] = classes[i.dataset.cls] || {})[i.dataset.k] = +i.value; });
+  document.querySelectorAll(".hysin").forEach(i => { hysteresis[i.dataset.k] = +i.value; });
+  return { classes, hysteresis };
 }
 
 /* ---------------- E. Deception ---------------- */
@@ -699,8 +825,9 @@ async function pageDeception() {
     kpi("Decoys ready in cluster", st.kubernetes_available ? `${cl.filter(d => d.ready_replicas > 0 && (d.endpoints == null || d.endpoints > 0)).length} / ${cl.length}` : NA, "ready pods with Service endpoints"),
     kpi("Active (tracked)", fmt(st.active_decoys.filter(d => d.status === "active").length), `${fmt(st.active_decoys.filter(d => d.status === "deploying").length)} deploying · max ${st.limits.max_active_decoys}`),
     kpi("Interactions", fmt(inter.length), inter.length ? "last " + ago(inter[0].ts) : "none collected yet"),
-    kpi("Thresholds", `${st.thresholds.high_confidence} / ${st.thresholds.medium_confidence}`, `high / medium confidence · ${st.thresholds.repeat_count} repeats in ${st.thresholds.repeat_window_seconds}s`),
+    kpi("Engaged sources", fmt((st.engagements || []).length), `${fmt((st.engagements || []).filter(e => (e.redirect || {}).applied).length)} redirected to decoys`),
   ].join("");
+  renderPolicy(st);
   $("decCluster").innerHTML = st.cluster_error ? errBox(st.cluster_error) : !st.kubernetes_available ? empty("Kubernetes unavailable", st.kubernetes_error || "") : table([
     { h: "Decoy", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Profile", k: "profile" },
     { h: "Ready", f: r => { const ok = r.ready_replicas > 0 && (r.endpoints == null || r.endpoints > 0); return pill(`${r.ready_replicas}/${r.replicas}${r.endpoints != null ? " · " + r.endpoints + " ep" : ""}`, ok ? "ok" : "deploying"); } },
@@ -871,9 +998,17 @@ $("capStart").onclick = e => act(e.currentTarget, () => api("/api/live/capture/s
 $("capStop").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Stop packet capture?", "The current window is finished and scored, then capture stops. Detection stops until you start it again.")) act(b, () => api("/api/live/capture/stop", { method: "POST" }), "Capture stopped").then(loadChrome); };
 $("capProcess").onclick = e => act(e.currentTarget, () => api("/api/live/process?limit=50", { method: "POST" }), r => `Processed ${r.processed.length} PCAP(s): ${r.processed.filter(x => x.status === "classified").length} classified, ${r.processed.filter(x => x.status === "failed").length} failed`);
 $("evalBtn").onclick = e => runEval(e.currentTarget);
-$("labScenario").addEventListener("change", onScenario);
-$("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: true }) }), r => `Job ${r.job} created → ${r.target}. ${r.notes.join("; ")}. Waiting for the generator log to confirm traffic…`);
-$("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/trafficlab/launch", { method: "POST", body: labBody() }), r => `Job ${r.job} created → ${r.target}`);
+$("labTargets").addEventListener("change", onScenario);
+$("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: true }) }),
+  r => `${r.jobs.length} Job(s) created${r.launch_errors.length ? `, ${r.launch_errors.length} refused` : ""}. ${r.notes.join("; ")}. Waiting for the generator logs to confirm traffic…`);
+$("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: false, auto_stop: false }) }),
+  r => `${r.jobs.length} Job(s) created (capture not started)`);
+document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
+  S.ovRange = +b.dataset.range; document.querySelectorAll("[data-range]").forEach(x => x.classList.toggle("on", x === b));
+  try { localStorage.setItem("ids.ovRange", String(S.ovRange)); } catch (_) { }
+  refresh(true);
+}));
+try { const r = +localStorage.getItem("ids.ovRange"); if ([5, 15, 30].includes(r)) { S.ovRange = r; document.querySelectorAll("[data-range]").forEach(x => x.classList.toggle("on", +x.dataset.range === r)); } } catch (_) { }
 $("baseOn").onclick = e => act(e.currentTarget, () => api("/api/trafficlab/baseline", { method: "PUT", body: { running: true } }), "Benign baseline scaled to 1");
 $("baseOff").onclick = e => act(e.currentTarget, () => api("/api/trafficlab/baseline", { method: "PUT", body: { running: false } }), "Benign baseline scaled to 0");
 $("jdClose").onclick = () => $("jobDialog").close();
@@ -883,6 +1018,9 @@ document.addEventListener("click", async e => {
   if (t.dataset.deljob && await confirmDlg("Delete traffic Job?", `${t.dataset.deljob} and its pod are deleted; running traffic stops.`)) act(t, () => api("/api/trafficlab/jobs/" + encodeURIComponent(t.dataset.deljob), { method: "DELETE" }), "Job deleted");
   if (t.dataset.rmdecoy && await confirmDlg("Remove decoy?", `${t.dataset.rmdecoy} (Deployment and Service) is deleted from ids-deception. Its last interactions are collected first.`)) act(t, () => api("/api/deception/decoys/" + encodeURIComponent(t.dataset.rmdecoy), { method: "DELETE" }), "Decoy removed");
 });
+$("polForm").addEventListener("input", () => { S.polDirty = true; });
+$("polSave").onclick = e => act(e.currentTarget, async () => { const r = await api("/api/deception/detection-policy", { method: "PUT", body: policyBody() }); S.polDirty = false; return r; }, "Thresholds saved; used from the next cycle");
+$("polReset").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Reset thresholds?", "Saved overrides are deleted and the defaults from config/live.yaml apply again.")) act(b, async () => { const r = await api("/api/deception/detection-policy", { method: "PUT", body: { reset: true } }); S.polDirty = false; return r; }, "Thresholds reset to defaults"); };
 $("decEnable").onclick = e => act(e.currentTarget, () => api("/api/deception/enable", { method: "POST" }), "Automatic deception enabled (acts on new evidence only)");
 $("decDisable").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Disable automatic deception?", "No new decoys are deployed for detections. Existing decoys keep running until their TTL expires.")) act(b, () => api("/api/deception/disable", { method: "POST" }), "Automatic deception disabled"); };
 $("decCycle").onclick = e => act(e.currentTarget, () => api("/api/deception/cycle", { method: "POST" }), r => `Cycle #${r.cycle_id}: ${r.actions.length} action(s)` + (r.housekeeping && r.housekeeping.error ? ` · ${r.housekeeping.error}` : ""));

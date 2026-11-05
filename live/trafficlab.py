@@ -170,8 +170,13 @@ def resolve_target(scenario: str, target: str | None, cfg: dict[str, Any], core=
 
 
 # --- jobs ------------------------------------------------------------------------------
+def scenario_defaults(scenario: str, cfg: dict[str, Any]) -> tuple[int, float]:
+    sc = cfg["traffic_lab"]["scenarios"][scenario]
+    return int(sc.get("count", 300)), float(sc.get("delay", 0.05))
+
+
 def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
-              count: int = 300, delay: float = 0.1) -> dict[str, Any]:
+              count: int | None = None, delay: float | None = None, run_id: str | None = None) -> dict[str, Any]:
     """The Job manifest. `target` must already be resolved (host:port[,host:port])."""
     tl = cfg["traffic_lab"]
     if scenario not in tl["scenarios"]:
@@ -179,6 +184,10 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
     sc = tl["scenarios"][scenario]
     mode = sc["mode"]
     slug = slugify(mode)
+    d_count, d_delay = scenario_defaults(scenario, cfg)
+    count = d_count if count is None else count
+    delay = d_delay if delay is None else delay
+    deadline = int(tl.get("job_deadline_seconds", 300))
     if target is None:
         t = tl["targets"][sc.get("default_target") or next(iter(tl["targets"]))]
         target = f"{t['host']}:{t['port']}"
@@ -189,6 +198,8 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "DELAY", "value": str(float(delay))},
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
         {"name": "PYTHONUNBUFFERED", "value": "1"},
+        # finish (and log why) before Kubernetes kills the pod at activeDeadlineSeconds
+        {"name": "TIME_BUDGET_S", "value": str(max(10, deadline - 30))},
     ]
     env += [{"name": str(k), "value": str(v)} for k, v in (sc.get("env") or {}).items()]
     container = {
@@ -200,7 +211,8 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
                             "capabilities": {"drop": ["ALL"]}},
         "volumeMounts": [{"name": "script", "mountPath": "/app", "readOnly": True}],
     }
-    labels = {"app": "traffic-lab", "scenario": slug}
+    expect = sc.get("expect_class")
+    labels = {"app": "traffic-lab", "scenario": slug, "expect-class": slugify(expect or "none")}
     pod = {
         "metadata": {"labels": labels},
         "spec": {
@@ -214,14 +226,16 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
     return {
         "apiVersion": "batch/v1", "kind": "Job",
         "metadata": {"generateName": f"traffic-{slug}-", "namespace": tl["namespace"], "labels": dict(labels),
-                     "annotations": {"ids/scenario": scenario, "ids/mode": mode, "ids/target": target[:250]}},
-        "spec": {"backoffLimit": 0, "activeDeadlineSeconds": int(tl.get("job_deadline_seconds", 300)),
+                     "annotations": {"ids/scenario": scenario, "ids/mode": mode, "ids/target": target[:250],
+                                     "ids/expect-class": expect or "", "ids/run": run_id or "",
+                                     "ids/count": str(int(count)), "ids/delay": str(float(delay))}},
+        "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline,
                  "ttlSecondsAfterFinished": 3600, "template": pod},
     }
 
 
-def launch(scenario: str, target: str | None = None, count: int = 300, delay: float = 0.1,
-           cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+def launch(scenario: str, target: str | None = None, count: int | None = None, delay: float | None = None,
+           cfg: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     if scenario not in cfg["traffic_lab"]["scenarios"]:
         raise TrafficLabError(f"unknown scenario {scenario!r}; one of {sorted(cfg['traffic_lab']['scenarios'])}")
@@ -230,28 +244,100 @@ def launch(scenario: str, target: str | None = None, count: int = 300, delay: fl
     if not ready["ready"]:
         raise TrafficLabError(ready["reason"] + (f" — run: {ready['fix']}" if ready.get("fix") else ""))
     resolved = resolve_target(scenario, target, cfg, core)
-    body = build_job(scenario, cfg, resolved["target"], count, delay)
+    body = build_job(scenario, cfg, resolved["target"], count, delay, run_id)
     try:
         created = batch.create_namespaced_job(cfg["traffic_lab"]["namespace"], body)
     except client.exceptions.ApiException as e:
         raise TrafficLabError(f"Kubernetes refused the Job ({e.status}): {_api_message(e)}")
     log.info("traffic lab: launched %s (%s) -> %s", created.metadata.name, scenario, resolved["target"])
+    ann = created.metadata.annotations or {}
     return {"job": created.metadata.name, "scenario": scenario, "mode": cfg["traffic_lab"]["scenarios"][scenario]["mode"],
-            "target": resolved["target"], "target_label": resolved["label"], "note": resolved.get("note")}
+            "target": resolved["target"], "target_label": resolved["label"], "note": resolved.get("note"),
+            "expect_class": cfg["traffic_lab"]["scenarios"][scenario].get("expect_class"),
+            "count": int(ann.get("ids/count", 0)), "delay": float(ann.get("ids/delay", 0))}
+
+
+def _conditions(j) -> list[dict[str, Any]]:
+    return [{"type": c.type, "status": c.status, "reason": c.reason, "message": c.message,
+             "time": c.last_transition_time.isoformat() if c.last_transition_time else None}
+            for c in (j.status.conditions or [])]
+
+
+_REASON_TEXT = {
+    "DeadlineExceeded": "Kubernetes stopped the Job at its time limit (activeDeadlineSeconds) and deleted its pod",
+    "BackoffLimitExceeded": "the generator container exited with an error",
+    "PodFailurePolicy": "a pod failure policy matched",
+}
+
+
+def failure_reason(j, pods: list | None = None, log_lines: list[str] | None = None,
+                   events: list[dict[str, Any]] | None = None) -> dict[str, Any] | None:
+    """Why a Job failed (or cannot start), from its conditions, the container's termination
+    state, Warning events and the generator log tail."""
+    stuck = [e for e in (events or []) if e["reason"] == "FailedCreate"]
+    if not j.status.failed and not any(c.type == "Failed" and c.status == "True" for c in (j.status.conditions or [])):
+        if stuck and not pods:
+            return {"job_reason": "FailedCreate", "job_message": stuck[-1]["message"], "deadline_seconds":
+                    j.spec.active_deadline_seconds, "summary": f"pod could not be created: {stuck[-1]['message'][:300]}",
+                    "log_tail": []}
+        return None
+    cond = next((c for c in (j.status.conditions or []) if c.type in ("Failed", "FailureTarget") and c.status == "True"), None)
+    out: dict[str, Any] = {"job_reason": cond.reason if cond else None, "job_message": cond.message if cond else None,
+                           "deadline_seconds": j.spec.active_deadline_seconds}
+    for p in pods or []:
+        for cs in p.status.container_statuses or []:
+            t = (cs.state and cs.state.terminated) or (cs.last_state and cs.last_state.terminated)
+            if t:
+                out.update(exit_code=t.exit_code, container_reason=t.reason, container_message=(t.message or "")[:300] or None)
+    reason = out.get("job_reason")
+    parts = [_REASON_TEXT.get(reason, reason or "failed")]
+    if out.get("exit_code") is not None:
+        parts.append(f"container {out.get('container_reason') or 'terminated'}, exit code {out['exit_code']}")
+    elif reason == "DeadlineExceeded":
+        parts.append("no pod left to read (deleted with the Job's deadline)")
+    tail = [ln for ln in (log_lines or []) if ln.strip()][-5:]
+    last = None
+    for ln in reversed(tail):
+        try:
+            rec = json.loads(ln)
+        except ValueError:
+            last = ln[:200]
+            break
+        if rec.get("action") in ("fatal", "budget_exhausted") or rec.get("error"):
+            last = f"{rec.get('action')}: {rec.get('error') or rec.get('note') or ''}".strip(": ")
+            break
+    if last:
+        parts.append(f"last log: {last}")
+    if stuck and not pods:
+        parts.append(f"pod could not be created: {stuck[-1]['message'][:200]}")
+    out["summary"] = "; ".join(parts)
+    out["log_tail"] = tail
+    return out
 
 
 def _job_state(s) -> str:
     if s.succeeded:
         return "succeeded"
-    if s.failed:
+    # a Job killed at its deadline can have failed=0 (its pod was deleted): trust the condition
+    if s.failed or any(c.type == "Failed" and c.status == "True" for c in (s.conditions or [])):
         return "failed"
     return "running" if s.active else "pending"
+
+
+def _job_events(core, ns: str, name: str) -> list[dict[str, Any]]:
+    """Warning events of a Job (e.g. FailedCreate when PodSecurity or a quota rejects its pod)."""
+    try:
+        evs = core.list_namespaced_event(ns, field_selector=f"involvedObject.name={name},type=Warning",
+                                         _request_timeout=5).items
+    except Exception:  # noqa: BLE001
+        return []
+    return [{"reason": e.reason, "message": (e.message or "")[:400], "count": e.count} for e in evs][-5:]
 
 
 def list_jobs(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     """Traffic-lab Jobs. Raises TrafficLabError when the cluster is unreachable."""
     cfg = cfg or load_config()
-    _, batch, _ = _api(cfg)
+    _, batch, core = _api(cfg)
     try:
         jobs = batch.list_namespaced_job(cfg["traffic_lab"]["namespace"], label_selector=SCENARIO_LABEL,
                                          _request_timeout=6).items
@@ -260,8 +346,14 @@ def list_jobs(cfg: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     out = []
     for j in jobs:
         s, ann = j.status, (j.metadata.annotations or {})
+        stuck = None
+        if not (s.active or s.succeeded or s.failed or s.conditions):     # pending: was its pod refused?
+            stuck = _job_events(core, cfg["traffic_lab"]["namespace"], j.metadata.name)
+        fail = failure_reason(j, [], None, stuck) if (s.failed or s.conditions or stuck) else None
         out.append({"name": j.metadata.name,
                     "scenario": ann.get("ids/scenario") or (j.metadata.labels or {}).get("scenario"),
+                    "expect_class": ann.get("ids/expect-class"), "run": ann.get("ids/run"),
+                    "failure": fail["summary"] if fail else None,
                     "target": ann.get("ids/target"), "state": _job_state(s), "active": s.active or 0,
                     "succeeded": s.succeeded or 0, "failed": s.failed or 0,
                     "started": s.start_time.isoformat() if s.start_time else None,
@@ -326,7 +418,10 @@ def job_detail(name: str, cfg: dict[str, Any] | None = None, tail: int = 2000) -
     for p in pods:
         waiting = next((cs.state.waiting.reason for cs in (p.status.container_statuses or [])
                         if cs.state and cs.state.waiting), None)
-        pod_info.append({"name": p.metadata.name, "phase": p.status.phase, "waiting": waiting, "ip": p.status.pod_ip})
+        term = next((cs.state.terminated for cs in (p.status.container_statuses or [])
+                     if cs.state and cs.state.terminated), None)
+        pod_info.append({"name": p.metadata.name, "phase": p.status.phase, "waiting": waiting, "ip": p.status.pod_ip,
+                         "exit_code": term.exit_code if term else None, "reason": term.reason if term else None})
         if p.status.phase in ("Running", "Succeeded", "Failed"):
             try:
                 text += core.read_namespaced_pod_log(p.metadata.name, ns, tail_lines=tail, _request_timeout=8)
@@ -334,11 +429,15 @@ def job_detail(name: str, cfg: dict[str, Any] | None = None, tail: int = 2000) -
                 log_error = _api_message(e)
     ann = j.metadata.annotations or {}
     summary = summarize_log(text)
+    lines = text.splitlines()
     return {"name": name, "scenario": ann.get("ids/scenario"), "target": ann.get("ids/target"),
+            "expect_class": ann.get("ids/expect-class"), "run": ann.get("ids/run"),
             "state": _job_state(j.status), "started": j.status.start_time.isoformat() if j.status.start_time else None,
             "completed": j.status.completion_time.isoformat() if j.status.completion_time else None,
             "pods": pod_info, "verification": summary, "log_error": log_error,
-            "log_tail": text.splitlines()[-25:]}
+            "conditions": _conditions(j), "failure": failure_reason(j, pods, lines, _job_events(core, ns, name)),
+            "events": _job_events(core, ns, name),
+            "log_tail": lines[-25:]}
 
 
 def delete_job(name: str, cfg: dict[str, Any] | None = None) -> dict[str, Any]:

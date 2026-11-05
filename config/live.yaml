@@ -13,6 +13,15 @@ detection:
   max_missing_feature_fraction: 0.2
   # A flow is "malicious" when its predicted class is not this one.
   benign_class: BENIGN
+  # Kubernetes control-plane / system traffic is scored but never counted as an
+  # attack (live/allowlist.py). Measured: the only non-BENIGN predictions on benign
+  # lab traffic were API-server flows (:6443 / 10.43.0.1:443), 2-4 packets, 0 bytes.
+  allowlist:
+    enabled: true
+    ports: [6443, 10250, 10257, 10259, 2379, 2380]   # API server, kubelet, controller-manager, scheduler, etcd
+    discover: true        # add the API server and kube-system pod/Service IPs from the cluster
+    addresses: {}         # extra "ip: reason" entries
+    cidrs: []             # extra networks, e.g. ["172.27.0.0/16"]
 
 # Per-source flow-burst detector (live/behavior.py). A single scan request looks
 # like a benign request; what gives a scan away is many flows from one source to
@@ -32,7 +41,10 @@ behavior:
 capture:
   interface: cni0                    # K3s pod bridge (Ethernet framing; see friend's notes)
   tcpdump: /usr/bin/tcpdump
-  bpf_filter: ""
+  # IPv4 only. Without a filter, ARP frames on cni0 reach CICFlowMeter, which reads
+  # the ARP header bytes (08 06 00 01 / 08 00 06 04) as addresses and emits bogus
+  # flows "8.6.0.1:0 -> 8.0.6.4:0, protocol 0". The scorer also drops such rows.
+  bpf_filter: "ip"
   snaplen: 0
   # Adaptive observation window (live/window.py). After every window the next size
   # is chosen from measured evidence, first matching rule wins:
@@ -52,6 +64,10 @@ capture:
     threat_seconds: 3                # R1 target; 1 s windows split most TCP flows
     calm_windows: 3
     evidence_confidence: 0.6
+  # Each window is converted together with the previous N seconds of PCAPs and only
+  # flows still active in the window are kept, so connections crossing a window
+  # boundary are scored whole instead of as fragments (live/flowcontext.py). 0 = off.
+  flow_context_seconds: 20
   retain_pcaps: 500
   state_file: captures/capture_state.json
   pid_file: captures/capture.pid
@@ -79,13 +95,20 @@ traffic_lab:
   # expect_class is what the scenario is meant to resemble, not a promise: the
   # dashboard compares it with what the model actually predicted for the run.
   scenarios:
-    benign:      {mode: benign,      default_target: nodered,  detectable: false, expect_class: BENIGN,     env: {MIN_DELAY: "0.5", MAX_DELAY: "1.5"}, description: "Low-rate browsing and health checks against the lab services"}
-    web_recon:   {mode: web_recon,   default_target: nodered,  detectable: false, expect_class: BENIGN,     description: "Bounded HTTP path enumeration of Node-RED (caught by the flow-burst detector, not the model)"}
-    port_scan:   {mode: port_scan,   default_target: nodered,  detectable: true,  expect_class: PortScan,   env: {PORT_START: "1", PORT_END: "1024", SCAN_TIMEOUT: "1"}, description: "TCP connect scan of ports 1-1024 on the pod behind a lab service"}
-    slow_dos:    {mode: slow_dos,    default_target: nodered,  detectable: true,  expect_class: DoS,        env: {SLOW_CONNS: "150", SLOW_HOLD_S: "20"}, description: "Many slow partial HTTP connections held open against a lab service"}
-    brute_force: {mode: brute_force, default_target: grafana,  detectable: true,  expect_class: BruteForce, env: {LOGIN_PATH: /login}, description: "Repeated failed logins against the Grafana login API"}
-    web_attack:  {mode: web_attack,  default_target: nodered,  detectable: true,  expect_class: WebAttack,  description: "HTTP requests carrying SQLi / XSS-style strings at a lab web service"}
-    decoy_probe: {mode: decoy_probe,                           detectable: false, expect_class: null,       description: "Requests to the deployed decoy services, to exercise interaction logging"}
+    # count / delay are the defaults the dashboard pre-fills for each scenario:
+    #   count = requests / login attempts / slow connections the generator makes
+    #           (port_scan scans PORT_START..PORT_END instead)
+    #   delay = seconds the generator waits between two of them (0 = as fast as possible)
+    benign:      {mode: benign,      default_target: nodered,  detectable: false, expect_class: BENIGN,     count: 120, delay: 0.5,  env: {MIN_DELAY: "0.5", MAX_DELAY: "1.5"}, description: "Low-rate browsing and health checks against the lab services"}
+    web_recon:   {mode: web_recon,   default_target: nodered,  detectable: false, expect_class: BENIGN,     count: 400, delay: 0.02, description: "Bounded HTTP path enumeration of Node-RED (caught by the flow-burst detector, not the model)"}
+    port_scan:   {mode: port_scan,   default_target: nodered,  detectable: true,  expect_class: PortScan,   count: 1024, delay: 0.01, env: {PORT_START: "1", PORT_END: "1024", SCAN_TIMEOUT: "1"}, description: "TCP connect scan of ports 1-1024 on the pod behind a lab service"}
+    slow_dos:    {mode: slow_dos,    default_target: nodered,  detectable: true,  expect_class: DoS,        count: 150, delay: 0.05, env: {SLOW_CONNS: "150", SLOW_HOLD_S: "20"}, description: "Many slow partial HTTP connections held open against a lab service"}
+    brute_force: {mode: brute_force, default_target: grafana,  detectable: true,  expect_class: BruteForce, count: 500, delay: 0.02, env: {LOGIN_PATH: /login}, description: "Repeated failed logins against the Grafana login API"}
+    web_attack:  {mode: web_attack,  default_target: nodered,  detectable: true,  expect_class: WebAttack,  count: 400, delay: 0.02, description: "HTTP requests carrying SQLi / XSS-style strings at a lab web service"}
+    decoy_probe: {mode: decoy_probe,                           detectable: false, expect_class: null,       count: 120, delay: 0.1,  description: "Requests to the deployed decoy services, to exercise interaction logging"}
+  # After every Job of a run has finished, wait this long so the last capture
+  # window closes and is scored, then stop capture automatically.
+  auto_stop_drain_seconds: 15
 
 deception:
   namespace: ids-deception
@@ -102,10 +125,39 @@ deception:
   deploy_timeout_seconds: 120
   act_on_sources: [pcap, live]
   thresholds:
-    high_confidence: 0.9
+    high_confidence: 0.9           # Threat page colouring / behaviour-alert repeats
     medium_confidence: 0.6
     repeat_count: 3
     repeat_window_seconds: 300
+  # When ML detections trigger deception (live/controller.py). Per attack class:
+  # trigger when at least `min_flows` flows from ONE source, each with confidence >=
+  # `min_confidence`, arrive within `window_seconds` AND their mean confidence is >=
+  # `mean_confidence`. A single flow never triggers. Editable on the Deception page
+  # (stored overrides win over these defaults). Calibration check: on 2,230 labelled
+  # CIC-IDS2017 flows the expected calibration error is 0.002 (scripts/calibrate_model.py),
+  # so probabilities are used as-is; the lab false positives sat at 0.51-0.52.
+  detection_policy:
+    default:    {min_confidence: 0.80, min_flows: 5,  window_seconds: 60, mean_confidence: 0.85}
+    PortScan:   {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
+    DoS:        {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
+    DDoS:       {min_confidence: 0.80, min_flows: 20, window_seconds: 60, mean_confidence: 0.85}
+    BruteForce: {min_confidence: 0.80, min_flows: 5,  window_seconds: 60, mean_confidence: 0.85}
+    WebAttack:  {min_confidence: 0.80, min_flows: 3,  window_seconds: 60, mean_confidence: 0.85}
+    Bot:        {min_confidence: 0.90, min_flows: 5,  window_seconds: 120, mean_confidence: 0.95}   # weakest class (F1 0.72)
+  # Hysteresis: an engaged source stays engaged while its evidence is at least
+  # `release_ratio` of the trigger levels; it is released (redirect undone, its decoys
+  # torn down) after `quiet_seconds` without such evidence or decoy interaction, and
+  # cannot re-trigger for `reengage_cooldown_seconds` after a release.
+  hysteresis:
+    release_ratio: 0.5
+    quiet_seconds: 180
+    reengage_cooldown_seconds: 120
+  # Divert an attacking lab pod to the decoys (live/redirect.py): label it so the
+  # quarantine NetworkPolicy applies (decoys + DNS only). Only these namespaces.
+  redirect:
+    enabled: true
+    namespaces: [ids-traffic]
+    label: ids-deception/quarantine
   engagement:
     window_seconds: 300
     scale_up_interactions: 20

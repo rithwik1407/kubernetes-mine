@@ -13,14 +13,14 @@ import pandas as pd
 from live.config import get_path, load_config
 from live.schema import (
     DST_IP, DST_PORT, FLOW_ID, LABEL, PROTOCOL, SRC_IP, SRC_PORT, TIMESTAMP,
-    SchemaError, align_features, parse_timestamps, read_flow_csv,
+    SchemaError, align_features, drop_non_ip_flows, parse_timestamps, read_flow_csv,
 )
 
 PREDICTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious",
     "capture_file", "source", "processing_time_ms", "detected_at", "true_label", "model",
-    "flow_duration_us", "packets", "bytes",
+    "flow_duration_us", "packets", "bytes", "allowlisted",
 ]
 
 
@@ -61,6 +61,10 @@ class FlowPredictor:
         self.max_missing = self.cfg["detection"]["max_missing_feature_fraction"]
         self.name = self.model_dir.name
         self.last_report: dict[str, Any] = {}
+        # Optional temperature calibration (scripts/calibrate_model.py writes it only when the
+        # measured calibration error is too high; absent = probabilities used unchanged).
+        cal = self.model_dir / "calibration.json"
+        self.temperature = float(__import__("json").loads(cal.read_text())["temperature"]) if cal.is_file() else None
 
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None = None) -> "FlowPredictor":
@@ -71,8 +75,9 @@ class FlowPredictor:
                       source: str = "unknown") -> pd.DataFrame:
         if source not in VALID_SOURCES:
             raise ValueError(f"source must be one of {VALID_SOURCES}")
+        df, dropped = drop_non_ip_flows(df)
         if df.empty:
-            self.last_report = {"rows": 0, "missing_features": [], "batch_ms": 0.0}
+            self.last_report = {"rows": 0, "missing_features": [], "batch_ms": 0.0, "dropped_non_ip": dropped}
             return pd.DataFrame(columns=PREDICTION_COLUMNS)
 
         X, missing = align_features(df, self.features)
@@ -82,6 +87,9 @@ class FlowPredictor:
 
         t0 = time.perf_counter()
         proba = self.model.predict_proba(X.to_numpy(np.float32))
+        if self.temperature:
+            proba = np.power(np.clip(proba, 1e-12, 1), 1.0 / self.temperature)
+            proba = proba / proba.sum(axis=1, keepdims=True)
         batch_ms = (time.perf_counter() - t0) * 1000
         idx = proba.argmax(axis=1)
         classes = self.classes[idx]
@@ -108,8 +116,10 @@ class FlowPredictor:
             "flow_duration_us": _num(df, ("flowduration",)),
             "packets": _num(df, ("totalfwdpackets",)).fillna(0) + _num(df, ("totalbackwardpackets",)).fillna(0),
             "bytes": _num(df, ("totallengthoffwdpackets",)).fillna(0) + _num(df, ("totallengthofbwdpackets",)).fillna(0),
+            "allowlisted": pd.Series(None, index=df.index, dtype="object"),
         }, index=df.index)
-        self.last_report = {"rows": int(len(df)), "missing_features": missing, "batch_ms": batch_ms}
+        self.last_report = {"rows": int(len(df)), "missing_features": missing, "batch_ms": batch_ms,
+                            "dropped_non_ip": dropped}
         return out.reset_index(drop=True)
 
     def predict_csv(self, path: str | Path, source: str = "unknown") -> pd.DataFrame:

@@ -62,12 +62,20 @@ class CaptureStart(BaseModel):
 class LaunchRequest(BaseModel):
     scenario: str = Field(..., max_length=64)
     target: str | None = Field(None, max_length=256, description="target key (nodered/grafana/influxdb) or decoy name")
-    count: int = Field(300, ge=1, le=5000)
-    delay: float = Field(0.1, ge=0.0, le=10.0)
+    count: int | None = Field(None, ge=1, le=5000, description="requests/attempts; default per scenario")
+    delay: float | None = Field(None, ge=0.0, le=10.0, description="seconds between requests; default per scenario")
 
 
-class RunRequest(LaunchRequest):
+class RunRequest(BaseModel):
+    """One scenario (`scenario`/`target`) or several at once (`scenarios` x `targets`)."""
+    scenario: str | None = Field(None, max_length=64)
+    target: str | None = Field(None, max_length=256)
+    scenarios: list[str] | None = Field(None, max_length=10)
+    targets: list[str] | None = Field(None, max_length=10)
+    count: int | None = Field(None, ge=1, le=5000)
+    delay: float | None = Field(None, ge=0.0, le=10.0)
     auto_capture: bool = True
+    auto_stop: bool = True
 
 
 class TestEvent(BaseModel):
@@ -131,6 +139,12 @@ def live_timeline(minutes: int = Query(30, ge=1, le=1440)):
     return queries.traffic_timeline(minutes, CFG)
 
 
+@router.get("/api/live/activity")
+def live_activity(minutes: int = Query(15, ge=1, le=180), bucket: int = Query(30, ge=5, le=600)):
+    """Overview chart: flows per fixed bucket, capture-off periods and malicious events."""
+    return queries.activity(minutes, bucket, CFG)
+
+
 @router.get("/api/live/bursts")
 def live_bursts(limit: int = Query(200, ge=1, le=5000)):
     return queries.behavior_alerts(limit, CFG)
@@ -167,6 +181,8 @@ def capture_start(req: CaptureStart):
 @router.post("/api/live/capture/stop")
 def capture_stop():
     from live import capture as cap
+    from live import pipeline
+    pipeline.cancel_auto_stop(CFG)          # manual Stop overrides a pending auto-stop
     try:
         return cap.stop(CFG)
     except OSError as e:
@@ -345,10 +361,17 @@ def pipeline_run(req: RunRequest):
     """Generate traffic and make sure it is captured and processed automatically."""
     from live import pipeline
     from live.trafficlab import TrafficLabError
-    if req.scenario not in CFG["traffic_lab"]["scenarios"]:
-        raise HTTPException(400, f"unknown scenario {req.scenario!r}")
+    scen = list(req.scenarios or ([req.scenario] if req.scenario else []))
+    if not scen:
+        raise HTTPException(422, "give `scenario` or a non-empty `scenarios` list")
+    bad = [x for x in scen if x not in CFG["traffic_lab"]["scenarios"]]
+    if bad:
+        raise HTTPException(400, f"unknown scenario {bad[0]!r}")
+    tg = list(req.targets or ([req.target] if req.target else []))
+    if len(scen) * max(1, len(tg)) > 20:
+        raise HTTPException(400, "at most 20 Jobs per run")
     try:
-        return pipeline.run_scenario(req.scenario, req.target, req.count, req.delay, req.auto_capture, CFG)
+        return pipeline.run_scenarios(scen, tg or None, req.count, req.delay, req.auto_capture, req.auto_stop, CFG)
     except TrafficLabError as e:
         msg = str(e)
         raise HTTPException(400 if msg.startswith(("target must", "unknown decoy", "no decoy")) else 503, msg)
@@ -369,6 +392,40 @@ def deception_status():
 @router.get("/api/deception/policy")
 def deception_policy():
     return queries.policy(CFG)
+
+
+class PolicyUpdate(BaseModel):
+    classes: dict[str, dict[str, float]] | None = None
+    hysteresis: dict[str, float] | None = None
+    reset: bool = False
+
+
+@router.get("/api/deception/detection-policy")
+def deception_detection_policy():
+    """Per-class trigger thresholds + hysteresis actually in force (config + saved overrides)."""
+    return controller().detection_policy()
+
+
+@router.put("/api/deception/detection-policy")
+def deception_detection_policy_set(req: PolicyUpdate):
+    if not req.reset and not req.classes and not req.hysteresis:
+        raise HTTPException(422, "nothing to update: give classes, hysteresis or reset")
+    try:
+        return controller().set_detection_policy(req.classes, req.hysteresis, req.reset)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@router.get("/api/deception/engagements")
+def deception_engagements(limit: int = Query(100, ge=1, le=1000)):
+    """Engaged sources: trigger, redirect state, linked decoys, release."""
+    return controller().engagements(limit)
+
+
+@router.get("/api/live/allowlist")
+def live_allowlist():
+    from live import allowlist
+    return allowlist.get(CFG).describe()
 
 
 @router.get("/api/deception/decisions")

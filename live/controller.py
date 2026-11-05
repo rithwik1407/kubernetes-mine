@@ -2,8 +2,9 @@
 
 Monitor   new ML detections, flow bursts and simulated test events; decoy status
           from Kubernetes; decoy interactions from decoy logs
-Analyze   group evidence by (source, attack class); apply confidence thresholds,
-          repeated-evidence and corroboration rules
+Analyze   group evidence by (source, attack class) and aggregate it per class policy:
+          N flows >= min confidence from one source within T s, mean confidence >= X;
+          engagements add hysteresis, a re-engage cooldown and the redirect of the source
 Plan      map the class (or burst target port) to decoy profiles; choose deploy,
           scale, refresh or a suppression (limit, cooldown) per profile
 Execute   create / scale / remove decoys through DecoyManager
@@ -26,6 +27,7 @@ from typing import Any
 
 from live.k8s_decoys import _NAME_RE as DECOY_NAME_RE, DecoyError, decoy_name
 from live import db
+from live import redirect as redir
 from live.config import load_config
 from live.logging_setup import get_logger
 
@@ -98,6 +100,72 @@ class MapeKController:
             db.kv_set(c, "deception_enabled", "1" if value else "0")
         log.info("deception %s", "enabled" if value else "disabled")
 
+    # --- detection policy (per class, editable) -----------------------------------------
+    POLICY_KEYS = ("min_confidence", "min_flows", "window_seconds", "mean_confidence")
+
+    def detection_policy(self) -> dict[str, Any]:
+        """Config defaults overlaid with the overrides saved from the dashboard."""
+        base = json.loads(json.dumps(self.d.get("detection_policy") or {"default": {
+            "min_confidence": 0.8, "min_flows": 5, "window_seconds": 60, "mean_confidence": 0.85}}))
+        hyst = dict(self.d.get("hysteresis") or {"release_ratio": 0.5, "quiet_seconds": 180, "reengage_cooldown_seconds": 120})
+        with self._conn() as c:
+            raw = db.kv_get(c, "detection_policy_override")
+        ov = json.loads(raw) if raw else {}
+        for cls, vals in (ov.get("classes") or {}).items():
+            base.setdefault(cls, dict(base["default"])).update(vals)
+        hyst.update(ov.get("hysteresis") or {})
+        return {"classes": base, "hysteresis": hyst, "overridden": bool(ov), "updated_at": ov.get("updated_at")}
+
+    def class_policy(self, cls: str) -> dict[str, Any]:
+        pol = self.detection_policy()["classes"]
+        return {**pol["default"], **pol.get(cls, {})}
+
+    def set_detection_policy(self, classes: dict[str, dict[str, Any]] | None, hysteresis: dict[str, Any] | None,
+                             reset: bool = False) -> dict[str, Any]:
+        """Validate and store dashboard overrides. Raises ValueError with the offending field."""
+        if reset:
+            with self._conn() as c:
+                c.execute("DELETE FROM kv WHERE key = 'detection_policy_override'")
+            log.info("detection policy reset to config defaults")
+            return self.detection_policy()
+        known = set(self.d["attack_policy"]) | {"default"}
+        limits = {"min_confidence": (0.5, 1.0, float), "mean_confidence": (0.5, 1.0, float),
+                  "min_flows": (1, 1000, int), "window_seconds": (5, 3600, int),
+                  "release_ratio": (0.1, 1.0, float), "quiet_seconds": (10, 7200, int),
+                  "reengage_cooldown_seconds": (0, 7200, int)}
+
+        def check(name, v):
+            lo, hi, typ = limits[name]
+            try:
+                v = typ(v)
+            except (TypeError, ValueError):
+                raise ValueError(f"{name} must be a number")
+            if not lo <= v <= hi:
+                raise ValueError(f"{name} must be between {lo} and {hi}")
+            return v
+
+        out: dict[str, Any] = {"classes": {}, "hysteresis": {}}
+        for cls, vals in (classes or {}).items():
+            if cls not in known:
+                raise ValueError(f"unknown class {cls!r}; one of {sorted(known)}")
+            out["classes"][cls] = {k: check(k, v) for k, v in vals.items() if k in self.POLICY_KEYS}
+            bad = set(vals) - set(self.POLICY_KEYS)
+            if bad:
+                raise ValueError(f"unknown field(s) for {cls}: {sorted(bad)}")
+        for k, v in (hysteresis or {}).items():
+            if k not in ("release_ratio", "quiet_seconds", "reengage_cooldown_seconds"):
+                raise ValueError(f"unknown hysteresis field {k!r}")
+            out["hysteresis"][k] = check(k, v)
+        with self._conn() as c:
+            prev = json.loads(db.kv_get(c, "detection_policy_override") or "{}")
+            for cls, vals in out["classes"].items():
+                prev.setdefault("classes", {}).setdefault(cls, {}).update(vals)
+            prev.setdefault("hysteresis", {}).update(out["hysteresis"])
+            prev["updated_at"] = iso(now_utc())
+            db.kv_set(c, "detection_policy_override", json.dumps(prev))
+        log.info("detection policy updated: %s", out)
+        return self.detection_policy()
+
     def _record(self, c, cycle_id, **fields) -> int:
         fields.setdefault("created_at", iso(now_utc()))
         if isinstance(fields.get("evidence"), (dict, list)):
@@ -133,18 +201,25 @@ class MapeKController:
         for r in ev["detections"]:
             groups[(r["src_ip"], r["predicted_class"])].append(r)
         for (src, cls), rows in groups.items():
-            history = c.execute(
-                "SELECT COUNT(*) FROM detections WHERE is_malicious = 1 AND simulated = 0 AND predicted_class = ? "
-                "AND src_ip IS ? AND detected_at >= ?", (cls, src, since)).fetchone()[0]
-            corroborated = src is not None and c.execute(
-                "SELECT COUNT(*) FROM behavior_alerts WHERE src_ip = ? AND detected_at >= ?", (src, since)).fetchone()[0] > 0
-            out.append(self._assess("ml", src, cls, max(r["confidence"] for r in rows), max(history, len(rows)),
-                                    corroborated, {"detection_ids": [r["id"] for r in rows[:50]], "batch": len(rows)},
-                                    simulated=False))
+            pol = self.class_policy(cls)
+            t_since = iso(now_utc() - timedelta(seconds=pol["window_seconds"]))
+            agg = [dict(x) for x in c.execute(
+                "SELECT id, confidence, dst_ip, dst_port FROM detections WHERE is_malicious = 1 AND simulated = 0 "
+                "AND predicted_class = ? AND src_ip IS ? AND detected_at >= ? AND confidence >= ? ORDER BY id DESC",
+                (cls, src, t_since, pol["min_confidence"]))]
+            n = len(agg)
+            mean = sum(x["confidence"] for x in agg) / n if n else 0.0
+            evidence = {"detection_ids": [x["id"] for x in agg[:30]], "new_in_cycle": len(rows), "flows": n,
+                        "mean_confidence": round(mean, 4), "window_seconds": pol["window_seconds"],
+                        "max_confidence_new": round(max(r["confidence"] for r in rows), 4),
+                        "targets": sorted({f"{x['dst_ip']}:{x['dst_port']}" for x in agg[:30]})[:5], "policy": pol}
+            out.append(self._assess_aggregate("ml", src, cls, n, mean, pol, evidence, simulated=False))
 
         for e in ev["simulated"]:
-            out.append(self._assess("simulated", e["src_ip"], e["attack_class"], e["confidence"], e["count"], False,
-                                    {"simulated_event_id": e["id"], "note": e["note"]}, simulated=True))
+            pol = self.class_policy(e["attack_class"])
+            out.append(self._assess_aggregate("simulated", e["src_ip"], e["attack_class"], e["count"], e["confidence"], pol,
+                                              {"simulated_event_id": e["id"], "note": e["note"], "policy": pol},
+                                              simulated=True))
 
         bursts: dict[tuple, list[dict]] = defaultdict(list)
         for a in ev["alerts"]:
@@ -176,28 +251,132 @@ class MapeKController:
             })
         return out
 
-    def _assess(self, trigger, src, cls, conf, count, corroborated, evidence, simulated) -> dict[str, Any]:
-        th = self.d["thresholds"]
+    def _assess_aggregate(self, trigger, src, cls, n, mean, pol, evidence, simulated) -> dict[str, Any]:
+        """Per-class aggregation: N confident flows from one source within T seconds, mean confidence >= X."""
         tag = "SIMULATED test event: " if simulated else ""
-        base = {"trigger": trigger, "src_ip": src, "attack_class": cls, "max_confidence": conf,
-                "evidence_count": count, "evidence": evidence, "simulated": simulated, "target_port": None}
+        base = {"trigger": trigger, "src_ip": src, "attack_class": cls, "max_confidence": round(mean, 4) if n else None,
+                "evidence_count": n, "evidence": evidence, "simulated": simulated, "target_port": None,
+                "mean_confidence": mean}
         if cls == self.benign_class:
             return {**base, "assessment": "benign", "actionable": False, "reason": tag + "benign traffic never triggers decoys"}
         if cls not in self.d["attack_policy"]:
             return {**base, "assessment": "n/a", "actionable": False, "reason": tag + f"no decoy policy for {cls}"}
-        if conf >= th["high_confidence"]:
-            return {**base, "assessment": "high", "actionable": True,
-                    "reason": tag + f"confidence {conf:.2f} >= high threshold {th['high_confidence']}"}
-        if conf >= th["medium_confidence"]:
-            if count >= th["repeat_count"] or corroborated:
-                why = (f"{count} detections in {th['repeat_window_seconds']}s >= {th['repeat_count']}"
-                       if count >= th["repeat_count"] else "corroborated by a flow burst from the same source")
-                return {**base, "assessment": "medium", "actionable": True,
-                        "reason": tag + f"medium confidence {conf:.2f} confirmed: {why}"}
-            return {**base, "assessment": "medium", "actionable": False,
-                    "reason": tag + f"medium confidence {conf:.2f}; {count}/{th['repeat_count']} repeated detections, awaiting evidence"}
-        return {**base, "assessment": "low", "actionable": False,
-                "reason": tag + f"confidence {conf:.2f} below {th['medium_confidence']}; recorded and monitored"}
+        need = (f"{pol['min_flows']} flows >= {pol['min_confidence']:.2f} in {pol['window_seconds']}s "
+                f"with mean >= {pol['mean_confidence']:.2f}")
+        got = f"{n} flow(s) from {src}, mean confidence {mean:.2f}"
+        if n >= pol["min_flows"] and mean >= pol["mean_confidence"]:
+            return {**base, "assessment": "high", "actionable": True, "reason": tag + f"{cls}: {got} (policy: {need})"}
+        hyst = self.detection_policy()["hysteresis"]
+        r = float(hyst.get("release_ratio", 0.5))
+        holding = n >= max(1, int(pol["min_flows"] * r + 0.999)) and mean >= pol["mean_confidence"] * r
+        return {**base, "assessment": "medium" if n else "low", "actionable": False, "sustains": holding,
+                "reason": tag + f"{cls}: {got}; below policy ({need}), recorded and monitored"}
+
+    # --- Engagements: hysteresis, cooldown, redirect --------------------------------
+    redirector = redir
+
+    def engage(self, c, cycle_id: int, assessments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Per-source state machine: trigger -> engaged (redirected) -> released after a quiet period."""
+        from live import allowlist as allow
+        hyst = self.detection_policy()["hysteresis"]
+        al = allow.get(self.cfg)
+        now = now_utc()
+        out = []
+        for a in assessments:
+            src = a.get("src_ip")
+            if src and al.reason(src, None, None, None):
+                out.append({**a, "actionable": False, "assessment": "allowlisted",
+                            "reason": a["reason"] + f"; {src} is control-plane traffic ({al.reason(src, None, None, None)}), never acted on"})
+                continue
+            if a["simulated"] or not src:
+                out.append(a)
+                continue
+            eng = c.execute("SELECT * FROM engagements WHERE src_ip = ? AND state = 'active'", (src,)).fetchone()
+            if a["actionable"]:
+                if eng:
+                    db.update_row(c, "engagements", eng["id"], last_evidence_at=iso(now))
+                    a = {**a, "engagement_id": eng["id"], "reason": a["reason"] + f"; source already engaged (#{eng['id']})"}
+                else:
+                    last = parse(c.execute("SELECT MAX(released_at) FROM engagements WHERE src_ip = ?", (src,)).fetchone()[0])
+                    wait = float(hyst.get("reengage_cooldown_seconds", 120))
+                    if last and (now - last).total_seconds() < wait:
+                        a = {**a, "actionable": False, "assessment": "cooldown",
+                             "reason": a["reason"] + f"; {src} was released {(now - last).total_seconds():.0f}s ago "
+                                                     f"(re-engage cooldown {wait:.0f}s)"}
+                    else:
+                        rd = self.redirector.quarantine(src, self.cfg) if self.redirector else \
+                            {"applied": False, "reason": "redirect not configured"}
+                        eid = db.insert_row(c, "engagements", src_ip=src, attack_class=a["attack_class"],
+                                            trigger=a["trigger"], state="active", started_at=iso(now),
+                                            last_evidence_at=iso(now), decoys="[]", redirect=json.dumps(rd),
+                                            reason=a["reason"])
+                        self._record(c, cycle_id, trigger=a["trigger"], src_ip=src, attack_class=a["attack_class"],
+                                     assessment=a["assessment"], max_confidence=a.get("max_confidence"),
+                                     evidence_count=a.get("evidence_count"), action="redirect",
+                                     result="ok" if rd.get("applied") else "skipped",
+                                     reason=f"engagement #{eid} opened: {a['reason']}. Redirect: {rd['reason']}",
+                                     evidence={**(a.get("evidence") or {}), "engagement_id": eid})
+                        a = {**a, "engagement_id": eid}
+            elif eng and a.get("sustains"):
+                db.update_row(c, "engagements", eng["id"], last_evidence_at=iso(now))
+                a = {**a, "reason": a["reason"] + f"; still >= {hyst['release_ratio']:.0%} of the trigger level, "
+                                                  f"engagement #{eng['id']} kept (hysteresis)"}
+            out.append(a)
+        return out
+
+    def _link_decoy(self, c, engagement_id: int | None, name: str | None) -> None:
+        if not engagement_id or not name:
+            return
+        row = c.execute("SELECT decoys FROM engagements WHERE id = ?", (engagement_id,)).fetchone()
+        names = json.loads(row["decoys"] or "[]") if row else []
+        if name not in names:
+            db.update_row(c, "engagements", engagement_id, decoys=json.dumps(names + [name]))
+
+    def _release_quiet(self, c, cycle_id: int, out: dict[str, Any]) -> None:
+        """Release engagements without evidence or decoy interaction for quiet_seconds."""
+        quiet = float(self.detection_policy()["hysteresis"].get("quiet_seconds", 180))
+        now = now_utc()
+        for e in [dict(r) for r in c.execute("SELECT * FROM engagements WHERE state = 'active'")]:
+            marks = [parse(e["last_evidence_at"])]
+            for sql in ("SELECT MAX(ts) FROM interactions WHERE src_ip = ?",
+                        "SELECT MAX(detected_at) FROM behavior_alerts WHERE src_ip = ?"):
+                v = c.execute(sql, (e["src_ip"],)).fetchone()[0]
+                if v:
+                    try:
+                        t = datetime.fromisoformat(str(v).replace("Z", "+00:00"))
+                        marks.append(t if t.tzinfo else t.replace(tzinfo=timezone.utc))
+                    except ValueError:
+                        pass
+            idle = (now - max(marks)).total_seconds()
+            if idle < quiet:
+                continue
+            rel = self.redirector.release(json.loads(e["redirect"] or "{}"), self.cfg) if self.redirector else \
+                {"released": False, "reason": "redirect not configured"}
+            others = set()
+            for r in c.execute("SELECT decoys FROM engagements WHERE state = 'active' AND id != ?", (e["id"],)):
+                others |= set(json.loads(r["decoys"] or "[]"))
+            removed = []
+            for name in json.loads(e["decoys"] or "[]"):
+                if name not in others and self.remove_decoy(
+                        c, name, "removed", cycle_id, "hysteresis",
+                        f"engagement #{e['id']} ({e['src_ip']}) quiet for {idle:.0f}s >= {quiet:.0f}s") == "ok":
+                    removed.append(name)
+            db.update_row(c, "engagements", e["id"], state="released", released_at=iso(now))
+            self._record(c, cycle_id, trigger="hysteresis", src_ip=e["src_ip"], attack_class=e["attack_class"],
+                         action="release", result="ok", assessment="n/a",
+                         reason=f"engagement #{e['id']} released: no evidence or decoy interaction for {idle:.0f}s "
+                                f"(quiet period {quiet:.0f}s). Redirect: {rel['reason']}. "
+                                f"Decoys torn down: {', '.join(removed) or 'none (still used or already gone)'}",
+                         evidence={"engagement_id": e["id"]})
+            out.setdefault("released", []).append(e["src_ip"])
+
+    def engagements(self, limit: int = 100) -> list[dict[str, Any]]:
+        with self._conn() as c:
+            rows = [dict(r) for r in c.execute("SELECT * FROM engagements ORDER BY id DESC LIMIT ?", (int(limit),))]
+        for r in rows:
+            r["decoys"] = json.loads(r["decoys"] or "[]")
+            r["redirect"] = json.loads(r["redirect"] or "{}")
+        return rows
 
     # --- Plan -----------------------------------------------------------------------
     def _profiles_for(self, c, a: dict[str, Any]) -> list[str]:
@@ -299,6 +478,8 @@ class MapeKController:
                 result = "ok"
             db.update_row(c, "decisions", dec_id, result=result,
                           reason=a["reason"] + (f" [failed: {error}]" if error else ""))
+            if result == "ok" and a["action"] in ("deploy", "scale", "refresh"):
+                self._link_decoy(c, a.get("engagement_id"), a.get("name"))
             results.append({"decision_id": dec_id, "action": a["action"], "profile": a.get("profile"), "result": result})
         return results
 
@@ -397,6 +578,7 @@ class MapeKController:
                     continue
             out["interactions"] += self._collect_for(c, r["name"])
 
+        self._release_quiet(c, cycle_id, out)
         e = self.d["engagement"]
         since = iso(now - timedelta(seconds=e["window_seconds"]))
         for r in [dict(x) for x in c.execute("SELECT * FROM decoys WHERE status = 'active'")]:
@@ -433,7 +615,7 @@ class MapeKController:
                     ev = self.monitor(c)
                     summary["evidence"] = {k: len(v) for k, v in ev.items()}
                     self.stage = "analyze"
-                    assessments = self.analyze(c, ev)
+                    assessments = self.engage(c, cycle_id, self.analyze(c, ev))
                     self.stage = "plan"
                     actions = self.plan(c, assessments)
                     self.stage = "execute"
@@ -524,4 +706,6 @@ class MapeKController:
             "limits": {k: self.d[k] for k in ("max_active_decoys", "max_replicas", "decoy_ttl_seconds",
                                                "cooldown_seconds", "redeploy_cooldown_seconds")},
             "thresholds": self.d["thresholds"],
+            "detection_policy": self.detection_policy(),
+            "engagements": [e for e in self.engagements(50) if e["state"] == "active"],
         }

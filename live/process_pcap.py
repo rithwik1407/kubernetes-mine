@@ -11,12 +11,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+import tempfile
+
+from live import allowlist as allow
+from live import flowcontext
 from live.behavior import flow_bursts
 from live.cicflowmeter import convert_pcap
 from live.config import get_path, load_config
 from live.logging_setup import get_logger
 from live.predictor import FlowPredictor
-from live.schema import SchemaError
+from live.schema import SchemaError, read_flow_csv
 from live import db
 
 log = get_logger(__name__)
@@ -41,8 +45,25 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
     t_start = time.monotonic()
     with db.connect(db.db_path(cfg)) as conn:
         cap_id = db.upsert_capture(conn, pcap.name, **(capture_fields or {}))
-    conv = convert_pcap(pcap, cfg=cfg)
-    summary: dict[str, Any] = {"pcap": pcap.name, "conversion": conv.to_dict(), "capture_id": cap_id}
+    context_s = float(cfg["capture"].get("flow_context_seconds", 0) or 0)
+    ctx: dict[str, Any] = {"seconds": context_s, "files": 0, "dropped_ended_before_window": 0}
+    try:
+        earlier = flowcontext.context_files(pcap, context_s)
+        window_start = flowcontext.first_packet_time(pcap)
+    except (OSError, ValueError):
+        earlier, window_start = [], None
+    if earlier:
+        # Convert this window together with the preceding seconds of traffic, so connections
+        # that cross a window boundary are scored whole (see live/flowcontext.py).
+        tmpdir = tempfile.TemporaryDirectory(prefix="ctx-", dir=get_path("flows_dir", cfg))
+        merged = Path(tmpdir.name) / pcap.name
+        ctx["files"] = flowcontext.concat_pcaps(earlier + [pcap], merged) - 1
+        conv = convert_pcap(merged, cfg=cfg)
+        conv.pcap = str(pcap)
+        tmpdir.cleanup()
+    else:
+        conv = convert_pcap(pcap, cfg=cfg)
+    summary: dict[str, Any] = {"pcap": pcap.name, "conversion": conv.to_dict(), "capture_id": cap_id, "context": ctx}
 
     with db.connect(db.db_path(cfg)) as conn:
         fields: dict[str, Any] = {"conversion_s": conv.seconds, "flows": conv.flows,
@@ -53,7 +74,12 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
             summary["status"] = conv.status
             return summary
         try:
-            pred = predictor.predict_csv(conv.csv, source="pcap")
+            flows = read_flow_csv(conv.csv)
+            if earlier:
+                flows, ctx["dropped_ended_before_window"] = flowcontext.keep_active_flows(flows, window_start)
+            fields["flows"] = len(flows)
+            pred = predictor.predict_frame(flows, capture_file=Path(conv.csv).name, source="pcap")
+            pred = allow.get(cfg).apply(pred)
         except (SchemaError, ValueError) as e:
             db.upsert_capture(conn, pcap.name, status="failed", error=f"prediction: {e}", **fields)
             summary.update(status="failed", error=str(e))
@@ -71,15 +97,17 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
                       pipeline_s=time.monotonic() - ref, error=None)
         db.upsert_capture(conn, pcap.name, **fields)
     ev_conf = float(cfg["capture"]["window"].get("evidence_confidence", 0.6))
-    strong = pred[pred["is_malicious"].astype(bool) & (pred["confidence"] >= ev_conf)]
+    strong = pred[pred["is_malicious"].astype(bool) & (pred["confidence"] >= ev_conf)] if len(pred) else pred
     summary["evidence"] = {
         "malicious_flows": int(len(strong)), "bursts": int(len(bursts)),
         "top_class": strong["predicted_class"].value_counts().idxmax() if len(strong) else None,
         "max_confidence": float(strong["confidence"].max()) if len(strong) else None,
     }
     summary.update(
-        status="classified", detections=stored, malicious=int(pred["is_malicious"].sum()),
-        classes=pred["predicted_class"].value_counts().to_dict(),
+        status="classified", detections=stored, malicious=int(pred["is_malicious"].sum()) if len(pred) else 0,
+        allowlisted=int(pred["allowlisted"].notna().sum()) if len(pred) else 0,
+        dropped_non_ip=int(predictor.last_report.get("dropped_non_ip", 0)),
+        classes=pred["predicted_class"].value_counts().to_dict() if len(pred) else {},
         prediction_ms=predictor.last_report["batch_ms"], pipeline_s=fields["pipeline_s"])
     log.info("%s: %d flows, %d malicious, %d bursts, conv %.2fs, pipeline %.2fs", pcap.name, stored,
              summary["malicious"], summary["flow_bursts"], conv.seconds, fields["pipeline_s"])

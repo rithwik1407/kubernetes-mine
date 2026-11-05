@@ -44,6 +44,8 @@ rules:
   - {apiGroups: ["apps"], resources: ["deployments/scale"], resourceNames: ["traffic-benign"], verbs: ["get","patch"]}
   # read-only check that the generator script is deployed before launching a Job
   - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["traffic-generator-script"], verbs: ["get"]}
+  # deception redirect: add/remove the ids-deception/quarantine label on an attacking lab pod
+  - {apiGroups: [""], resources: ["pods"], verbs: ["patch"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -76,3 +78,29 @@ kind: ClusterRoleBinding
 metadata: {name: ids-cluster-viewer}
 subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
 roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: ids-cluster-viewer}
+---
+# Control-plane allowlist (live/allowlist.py): read the API server address and the
+# kube-system pod/Service IPs so their traffic is never treated as an attack. Read-only.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ids-allowlist-reader, namespace: default}
+rules:
+  - {apiGroups: [""], resources: ["services","endpoints"], resourceNames: ["kubernetes"], verbs: ["get"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ids-allowlist-reader, namespace: default}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ids-allowlist-reader}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata: {name: ids-allowlist-reader, namespace: kube-system}
+rules:
+  - {apiGroups: [""], resources: ["pods","services"], verbs: ["get","list"]}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata: {name: ids-allowlist-reader, namespace: kube-system}
+subjects: [{kind: ServiceAccount, name: ids-controller, namespace: ids-deception}]
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: ids-allowlist-reader}

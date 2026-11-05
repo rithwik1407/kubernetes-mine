@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS detections (
     predicted_class TEXT NOT NULL, confidence REAL NOT NULL, is_malicious INTEGER NOT NULL,
     capture_file TEXT, source TEXT NOT NULL, processing_time_ms REAL, detected_at TEXT NOT NULL,
     true_label TEXT, model TEXT, simulated INTEGER NOT NULL DEFAULT 0,
-    flow_duration_us REAL, packets INTEGER, bytes INTEGER
+    flow_duration_us REAL, packets INTEGER, bytes INTEGER, allowlisted TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_det_detected_at ON detections(detected_at);
 CREATE INDEX IF NOT EXISTS idx_det_malicious   ON detections(is_malicious);
@@ -88,6 +88,13 @@ CREATE TABLE IF NOT EXISTS window_transitions (
 );
 CREATE INDEX IF NOT EXISTS idx_win_created ON window_transitions(created_at);
 
+CREATE TABLE IF NOT EXISTS engagements (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, src_ip TEXT NOT NULL, attack_class TEXT, trigger TEXT,
+    state TEXT NOT NULL, started_at TEXT NOT NULL, last_evidence_at TEXT NOT NULL, released_at TEXT,
+    decoys TEXT, redirect TEXT, reason TEXT, decision_id INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_eng_src ON engagements(src_ip, state);
+
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -95,7 +102,7 @@ DETECTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious", "capture_file", "source",
     "processing_time_ms", "detected_at", "true_label", "model",
-    "flow_duration_us", "packets", "bytes",
+    "flow_duration_us", "packets", "bytes", "allowlisted",
 ]
 
 
@@ -121,7 +128,8 @@ def connect(path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
 
 
 _MIGRATIONS = {"captures": {"window_s": "REAL"}, "behavior_alerts": {"distinct_ports": "INTEGER"},
-               "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER"}}
+               "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER",
+                              "allowlisted": "TEXT"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

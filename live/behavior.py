@@ -27,6 +27,8 @@ def flow_bursts(pred: pd.DataFrame, window_s: float | None,
         return pd.DataFrame(columns=BURST_COLUMNS)
     df = pred[pred["src_ip"].notna() & pred["dst_ip"].notna() & pred["dst_port"].notna()]
     df = df[df["protocol"].isin(b["protocols"]) & ~df["src_ip"].isin(b.get("ignore_sources", []))]
+    if "allowlisted" in df.columns:          # control-plane traffic never forms a burst
+        df = df[df["allowlisted"].isna()]
     if df.empty:
         return pd.DataFrame(columns=BURST_COLUMNS)
     rows = []

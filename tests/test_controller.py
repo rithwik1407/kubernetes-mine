@@ -27,18 +27,105 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def test_high_confidence_portscan_deploys_decoy(cfg):
+def _flows(cls, n, conf, src="10.42.0.9", port=1880):
+    with db.connect(DBP[0]) as c:
+        for _ in range(n):
+            db.insert_row(c, "detections", predicted_class=cls, confidence=conf, is_malicious=1,
+                          source="live", detected_at=_now(), src_ip=src, dst_ip="10.43.0.5",
+                          dst_port=port, protocol=6, model="m")
+
+
+DBP = [None]
+
+
+@pytest.fixture(autouse=True)
+def _db(cfg):
+    DBP[0] = cfg["paths"]["database"]
+
+
+def test_single_confident_flow_never_triggers(cfg):
+    """The old single-flow threshold is gone: one 0.98 PortScan flow is recorded, not acted on."""
     mgr = FakeManager()
     ctl = MapeKController(cfg, manager=mgr)
     ctl.set_enabled(True)
-    with db.connect(cfg["paths"]["database"]) as c:
-        db.insert_row(c, "detections", predicted_class="PortScan", confidence=0.98, is_malicious=1,
-                      source="live", detected_at=_now(), src_ip="10.42.0.9", dst_ip="10.43.0.5",
-                      dst_port=1880, protocol=6, model="m")
+    _flows("PortScan", 1, 0.98)
     summary = ctl.run_cycle()
     assert summary["evidence"]["detections"] == 1
+    assert mgr.deployed == {}
+    with db.connect(DBP[0]) as c:
+        reason = c.execute("SELECT reason FROM decisions ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert "below policy" in reason and "10 flows" in reason
+
+
+def test_aggregated_portscan_deploys_decoy(cfg):
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    pol = ctl.class_policy("PortScan")
+    _flows("PortScan", pol["min_flows"], 0.97)
+    summary = ctl.run_cycle()
     assert any(a["action"] == "deploy" and a["result"] == "ok" for a in summary["actions"])
     assert "decoy-web-portal" in mgr.deployed
+    eng = ctl.engagements()
+    assert len(eng) == 1 and eng[0]["src_ip"] == "10.42.0.9" and eng[0]["state"] == "active"
+    assert "decoy-web-portal" in eng[0]["decoys"]
+    with db.connect(DBP[0]) as c:
+        assert c.execute("SELECT COUNT(*) FROM decisions WHERE action = 'redirect'").fetchone()[0] == 1
+
+
+def test_low_mean_confidence_does_not_trigger(cfg):
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    _flows("DoS", 30, 0.81)          # enough flows, each >= 0.80, but mean 0.81 < 0.85
+    ctl.run_cycle()
+    assert mgr.deployed == {}
+
+
+def test_allowlisted_source_is_never_acted_on(cfg):
+    """Even if control-plane flows were stored as malicious, the controller refuses them."""
+    cfg["detection"]["allowlist"]["addresses"] = {"10.42.0.9": "test control plane"}
+    from live import allowlist
+    allowlist.reset_cache()
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    _flows("PortScan", 20, 0.99)
+    ctl.run_cycle()
+    assert mgr.deployed == {}
+
+
+def test_release_after_quiet_period_and_cooldown(cfg):
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    ctl.set_detection_policy(None, {"quiet_seconds": 10, "reengage_cooldown_seconds": 600})
+    _flows("WebAttack", 5, 0.99)
+    ctl.run_cycle()
+    assert ctl.engagements()[0]["state"] == "active"
+    with db.connect(DBP[0]) as c:          # pretend the last evidence was long ago
+        c.execute("UPDATE engagements SET last_evidence_at = '2000-01-01T00:00:00+00:00'")
+    ctl.run_cycle()
+    e = ctl.engagements()[0]
+    assert e["state"] == "released" and mgr.deployed == {}     # decoys torn down
+    _flows("WebAttack", 5, 0.99)                                # fresh evidence inside the cooldown
+    ctl.run_cycle()
+    assert len(ctl.engagements()) == 1 and mgr.deployed == {}
+    with db.connect(DBP[0]) as c:
+        assert "re-engage cooldown" in c.execute("SELECT reason FROM decisions ORDER BY id DESC LIMIT 1").fetchone()[0]
+
+
+def test_detection_policy_override_and_validation(cfg):
+    ctl = MapeKController(cfg, manager=FakeManager())
+    ctl.set_detection_policy({"PortScan": {"min_flows": 2}}, None)
+    assert ctl.class_policy("PortScan")["min_flows"] == 2
+    assert ctl.detection_policy()["overridden"]
+    with pytest.raises(ValueError):
+        ctl.set_detection_policy({"PortScan": {"min_confidence": 1.5}}, None)
+    with pytest.raises(ValueError):
+        ctl.set_detection_policy({"NotAClass": {"min_flows": 2}}, None)
+    ctl.set_detection_policy(None, None, reset=True)
+    assert ctl.class_policy("PortScan")["min_flows"] == cfg["deception"]["detection_policy"]["PortScan"]["min_flows"]
 
 
 def test_benign_never_deploys(cfg):
@@ -72,11 +159,8 @@ def test_max_active_decoys_suppresses(cfg):
     ctl = MapeKController(cfg, manager=mgr)
     ctl.set_enabled(True)
     now = _now()
-    with db.connect(cfg["paths"]["database"]) as c:
-        for cls, port in [("PortScan", 1), ("BruteForce", 2), ("WebAttack", 3), ("DDoS", 4), ("DoS", 5)]:
-            db.insert_row(c, "detections", predicted_class=cls, confidence=0.98, is_malicious=1,
-                          source="live", detected_at=now, src_ip=f"10.42.0.{port}", dst_ip="10.43.0.5",
-                          dst_port=1880, protocol=6, model="m")
+    for cls, port in [("PortScan", 1), ("BruteForce", 2), ("WebAttack", 3), ("DDoS", 4), ("DoS", 5)]:
+        _flows(cls, 25, 0.98, src=f"10.42.0.{port}")
     ctl.run_cycle()
     assert len(mgr.deployed) <= cfg["deception"]["max_active_decoys"]
 

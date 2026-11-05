@@ -52,12 +52,32 @@ PORT_END = int(os.environ.get("PORT_END", "1024"))
 SLOW_CONNS = int(os.environ.get("SLOW_CONNS", "200"))
 SLOW_HOLD_S = float(os.environ.get("SLOW_HOLD_S", "25"))
 LOGIN_PATH = os.environ.get("LOGIN_PATH", "/login")
+# Stop cleanly before the Job's activeDeadlineSeconds. Without this, a run that is
+# slower than expected (targets not answering, every connect waiting for its timeout)
+# is killed by Kubernetes, its pod is deleted and the only trace is "DeadlineExceeded".
+TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_S", "0"))   # 0 = unlimited
+_T0 = time.monotonic()
+_COUNTS = {"ok": 0, "errors": 0}
+_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal"}
 
 
 def emit(**fields) -> None:
     fields["ts"] = datetime.now(timezone.utc).isoformat()
     fields["mode"] = MODE
+    if fields.get("action") not in _NOT_COUNTED:
+        _COUNTS["errors" if fields.get("error") else "ok"] += 1
     print(json.dumps(fields), flush=True)
+
+
+def out_of_time() -> bool:
+    """True (and logged once) when the time budget is used up; callers stop their loop."""
+    if TIME_BUDGET_S <= 0 or time.monotonic() - _T0 < TIME_BUDGET_S:
+        return False
+    if not _COUNTS.get("budget_logged"):
+        _COUNTS["budget_logged"] = 1
+        emit(action="budget_exhausted", note=f"stopped after {TIME_BUDGET_S:.0f}s time budget",
+             answered=_COUNTS["ok"], failed=_COUNTS["errors"])
+    return True
 
 
 def host_port(target: str, default_port: int) -> tuple[str, int]:
@@ -95,7 +115,7 @@ def run_benign() -> None:
     bounded = "COUNT" in os.environ
     emit(action="start", scenario="benign", count=COUNT if bounded else None)
     i = 0
-    while not bounded or i < COUNT:
+    while (not bounded or i < COUNT) and not out_of_time():
         url, path = random.choice(BENIGN_REQUESTS)
         http_get(url, path)
         i += 1
@@ -112,6 +132,8 @@ RECON_PATHS = ["/", "/admin", "/login", "/settings", "/flows", "/api", "/api/sta
 def run_web_recon() -> None:
     emit(action="start", scenario="web_recon", target=NODERED, count=COUNT)
     for i in range(COUNT):
+        if out_of_time():
+            break
         http_get(NODERED, random.choice(RECON_PATHS) + (f"?{i}" if random.random() < 0.3 else ""))
         time.sleep(DELAY)
     emit(action="done", scenario="web_recon")
@@ -124,6 +146,8 @@ def run_port_scan() -> None:
     emit(action="start", scenario="port_scan", host=host, port_start=lo, port_end=hi)
     opened = 0
     for port in range(lo, hi + 1):
+        if out_of_time():
+            break
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(SCAN_TIMEOUT)
         try:
@@ -154,6 +178,8 @@ def run_slow_dos() -> None:
     emit(action="start", scenario="slow_dos", host=host, port=port, conns=SLOW_CONNS, hold_s=SLOW_HOLD_S)
     socks = []
     for i in range(SLOW_CONNS):
+        if out_of_time():
+            break
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(TIMEOUT)
         try:
@@ -167,7 +193,7 @@ def run_slow_dos() -> None:
         time.sleep(DELAY)
     emit(action="slow_established", host=host, established=len(socks))
     deadline = time.monotonic() + SLOW_HOLD_S
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and not out_of_time():
         for s in socks:
             try:
                 s.sendall(b"X-a: b\r\n")   # drip one header line to keep the connection alive
@@ -192,6 +218,8 @@ def run_brute_force() -> None:
     USERS = ["admin", "root", "test", "user", "guest"]
     if port in (22, 2222):                       # SSH-style: repeated TCP connects to the SSH port
         for i in range(COUNT):
+            if out_of_time():
+                break
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(TIMEOUT)
             try:
@@ -206,6 +234,8 @@ def run_brute_force() -> None:
     else:                                        # HTTP login attempts (Grafana-style JSON /login)
         base = f"http://{host}:{port}"
         for i in range(COUNT):
+            if out_of_time():
+                break
             user = random.choice(USERS)
             data = json.dumps({"user": user, "username": user, "password": f"wrong-{i}"}).encode()
             req = urllib.request.Request(base + LOGIN_PATH, data=data, method="POST",
@@ -236,6 +266,8 @@ def run_web_attack() -> None:
     base = f"http://{host}:{port}"
     emit(action="start", scenario="web_attack", target=base, count=COUNT)
     for i in range(COUNT):
+        if out_of_time():
+            break
         http_get(base, random.choice(WEB_PAYLOADS))
         time.sleep(DELAY)
     emit(action="done", scenario="web_attack")
@@ -255,6 +287,8 @@ def run_decoy_probe() -> None:
     targets = [t.strip() for t in TARGET.split(",") if t.strip()]
     emit(action="start", scenario="decoy_probe", targets=targets, count=COUNT)
     for i in range(COUNT):
+        if out_of_time():
+            break
         host, port = host_port(random.choice(targets), 8080)
         http_get(f"http://{host}:{port}", random.choice(DECOY_PATHS))
         time.sleep(DELAY)
@@ -276,6 +310,13 @@ def main() -> None:
         runner()
     except KeyboardInterrupt:
         emit(action="interrupted", scenario=MODE)
+        return
+    # Partial failures are normal for attack traffic (closed ports, 4xx), so the Job only
+    # fails when NOTHING was answered: then the target is unreachable and the run is useless.
+    if _COUNTS["ok"] == 0:
+        emit(action="fatal", error="no request was answered by the target",
+             failed=_COUNTS["errors"], target=TARGET)
+        sys.exit(2)
 
 
 if __name__ == "__main__":
