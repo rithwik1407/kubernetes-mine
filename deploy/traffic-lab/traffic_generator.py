@@ -14,6 +14,7 @@ MODE (env) selects the scenario:
   slow_dos     many slow, partial HTTP connections held open against one target
   brute_force  repeated login attempts against a test login endpoint / SSH port
   web_attack   HTTP requests carrying SQLi / XSS-style strings in query params
+  decoy_probe  HTTP requests to the deployed decoy services (exercises deception)
 
 Everything is bounded (request counts, a port range, a time budget) and aimed at
 lab targets only. No payload is executed; brute_force and web_attack send
@@ -39,6 +40,7 @@ INFLUXDB = os.environ.get("INFLUXDB_URL", "http://influxdb.target-apps.svc.clust
 # The single target for the attack-style scenarios (host[:port]); defaults to Node-RED.
 TARGET = os.environ.get("TARGET", "nodered.target-apps.svc.cluster.local:1880")
 TIMEOUT = float(os.environ.get("TIMEOUT", "5"))
+SCAN_TIMEOUT = float(os.environ.get("SCAN_TIMEOUT", "1"))   # per-port connect timeout for port_scan
 
 # Bounds (all overridable by env, all with safe defaults).
 COUNT = int(os.environ.get("COUNT", "300"))          # requests / attempts for bounded modes
@@ -49,6 +51,7 @@ PORT_START = int(os.environ.get("PORT_START", "1"))
 PORT_END = int(os.environ.get("PORT_END", "1024"))
 SLOW_CONNS = int(os.environ.get("SLOW_CONNS", "200"))
 SLOW_HOLD_S = float(os.environ.get("SLOW_HOLD_S", "25"))
+LOGIN_PATH = os.environ.get("LOGIN_PATH", "/login")
 
 
 def emit(**fields) -> None:
@@ -65,7 +68,9 @@ def host_port(target: str, default_port: int) -> tuple[str, int]:
 
 
 def http_get(url: str, path: str = "") -> None:
-    full = url.rstrip("/") + path
+    # percent-encode spaces/quotes in the path+query (urllib refuses raw spaces, which made
+    # a third of the web_attack requests fail locally without ever reaching the target)
+    full = url.rstrip("/") + urllib.parse.quote(path, safe="/?=&%:@!$'()*+,;-._~")
     req = urllib.request.Request(full, headers={"User-Agent": "ids-lab/1.0"})
     try:
         with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
@@ -85,11 +90,17 @@ BENIGN_REQUESTS = [
 
 
 def run_benign() -> None:
-    emit(action="start", scenario="benign")
-    while True:
+    """Continuous when COUNT is unset (the traffic-benign Deployment); bounded to COUNT
+    requests when launched as a Job, so the Job completes instead of hitting its deadline."""
+    bounded = "COUNT" in os.environ
+    emit(action="start", scenario="benign", count=COUNT if bounded else None)
+    i = 0
+    while not bounded or i < COUNT:
         url, path = random.choice(BENIGN_REQUESTS)
         http_get(url, path)
+        i += 1
         time.sleep(random.uniform(MIN_DELAY, MAX_DELAY))
+    emit(action="done", scenario="benign")
 
 
 # --- web_recon ----------------------------------------------------------------------
@@ -114,12 +125,16 @@ def run_port_scan() -> None:
     opened = 0
     for port in range(lo, hi + 1):
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        s.settimeout(TIMEOUT)
+        s.settimeout(SCAN_TIMEOUT)
         try:
             rc = s.connect_ex((host, port))
             if rc == 0:
                 opened += 1
                 emit(action="port_open", host=host, port=port)
+            elif rc in (111, 61):          # ECONNREFUSED (Linux, BSD): the host answered with RST
+                emit(action="port_closed", host=host, port=port)
+            else:                          # no answer (filtered / timeout)
+                emit(action="port_filtered", host=host, port=port, error=f"errno{rc}")
         except Exception as e:  # noqa: BLE001
             emit(action="port_error", host=host, port=port, error=type(e).__name__)
         finally:
@@ -145,7 +160,9 @@ def run_slow_dos() -> None:
             s.connect((host, port))
             s.sendall(f"GET /?{i} HTTP/1.1\r\nHost: {host}\r\n".encode())  # headers never completed
             socks.append(s)
-        except Exception:  # noqa: BLE001
+            emit(action="slow_conn", host=host, port=port, n=i)
+        except Exception as e:  # noqa: BLE001
+            emit(action="slow_conn", host=host, port=port, n=i, error=type(e).__name__)
             s.close()
         time.sleep(DELAY)
     emit(action="slow_established", host=host, established=len(socks))
@@ -186,19 +203,20 @@ def run_brute_force() -> None:
             finally:
                 s.close()
             time.sleep(DELAY)
-    else:                                        # HTTP form login attempts to a test URL
+    else:                                        # HTTP login attempts (Grafana-style JSON /login)
         base = f"http://{host}:{port}"
         for i in range(COUNT):
-            data = urllib.parse.urlencode({"username": random.choice(USERS),
-                                           "password": f"wrong-{i}"}).encode()
-            req = urllib.request.Request(base + "/login", data=data, headers={"User-Agent": "ids-lab/1.0"})
+            user = random.choice(USERS)
+            data = json.dumps({"user": user, "username": user, "password": f"wrong-{i}"}).encode()
+            req = urllib.request.Request(base + LOGIN_PATH, data=data, method="POST",
+                                         headers={"User-Agent": "ids-lab/1.0", "Content-Type": "application/json"})
             try:
                 with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
-                    emit(action="login_attempt", url=base + "/login", status=resp.status, n=i)
+                    emit(action="login_attempt", url=base + LOGIN_PATH, status=resp.status, n=i)
             except urllib.error.HTTPError as e:
-                emit(action="login_attempt", url=base + "/login", status=e.code, n=i)
+                emit(action="login_attempt", url=base + LOGIN_PATH, status=e.code, n=i)
             except Exception as e:  # noqa: BLE001
-                emit(action="login_error", url=base + "/login", error=type(e).__name__)
+                emit(action="login_error", url=base + LOGIN_PATH, error=type(e).__name__)
             time.sleep(DELAY)
     emit(action="done", scenario="brute_force")
 
@@ -223,9 +241,30 @@ def run_web_attack() -> None:
     emit(action="done", scenario="web_attack")
 
 
+# --- decoy_probe --------------------------------------------------------------------
+DECOY_PATHS = ["/", "/login", "/admin", "/api", "/api/v1/namespaces", "/flows", "/settings",
+               "/api/health", "/health", "/.env", "/robots.txt", "/metrics"]
+
+
+def run_decoy_probe() -> None:
+    """Interact with the deployed decoys (TARGET = comma-separated host:port list).
+
+    This is how the lab exercises the deception layer: the requests land in the
+    decoys' own JSON request logs, which the controller collects as interactions.
+    """
+    targets = [t.strip() for t in TARGET.split(",") if t.strip()]
+    emit(action="start", scenario="decoy_probe", targets=targets, count=COUNT)
+    for i in range(COUNT):
+        host, port = host_port(random.choice(targets), 8080)
+        http_get(f"http://{host}:{port}", random.choice(DECOY_PATHS))
+        time.sleep(DELAY)
+    emit(action="done", scenario="decoy_probe")
+
+
 RUNNERS = {
     "benign": run_benign, "web_recon": run_web_recon, "port_scan": run_port_scan,
     "slow_dos": run_slow_dos, "brute_force": run_brute_force, "web_attack": run_web_attack,
+    "decoy_probe": run_decoy_probe,
 }
 
 

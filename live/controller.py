@@ -54,6 +54,7 @@ class MapeKController:
         self._manager = manager
         self._manager_factory = manager_factory
         self.manager_error: str | None = None
+        self.last_error: str | None = None
         self.stage = "idle"
         self.last_cycle: dict[str, Any] = {}
         self._lock = threading.RLock()
@@ -147,11 +148,22 @@ class MapeKController:
 
         bursts: dict[tuple, list[dict]] = defaultdict(list)
         for a in ev["alerts"]:
-            bursts[(a["src_ip"], a["dst_port"])].append(a)
-        for (src, port), rows in bursts.items():
+            bursts[(a["src_ip"], a["dst_port"], a.get("alert_type") or "flow_burst")].append(a)
+        for (src, port, kind), rows in bursts.items():
             a = max(rows, key=lambda r: r["flows"])
-            windows = c.execute("SELECT COUNT(*) FROM behavior_alerts WHERE src_ip = ? AND dst_port = ? AND detected_at >= ?",
-                                (src, port, since)).fetchone()[0]
+            windows = c.execute("SELECT COUNT(*) FROM behavior_alerts WHERE src_ip = ? AND dst_port IS ? AND alert_type = ? "
+                                "AND detected_at >= ?", (src, port, kind, since)).fetchone()[0]
+            if kind == "port_sweep":
+                out.append({
+                    "trigger": "behavior", "src_ip": src, "attack_class": "Reconnaissance (port sweep)",
+                    "assessment": "high", "max_confidence": None, "evidence_count": max(windows, len(rows)),
+                    "actionable": True, "target_port": "sweep", "simulated": False,
+                    "reason": (f"port sweep: {a.get('distinct_ports')} distinct ports of {a['dst_ip']} in "
+                               f"{a['window_s']:.0f}s from {src} (threshold {self.cfg['behavior'].get('sweep_min_ports', 10)})"),
+                    "evidence": {"behavior_alert_ids": [r["id"] for r in rows],
+                                 "ml_classes": json.loads(a["ml_classes"] or "{}")},
+                })
+                continue
             out.append({
                 "trigger": "behavior", "src_ip": src, "attack_class": "Reconnaissance (flow burst)",
                 "assessment": "high", "max_confidence": None, "evidence_count": max(windows, len(rows)),
@@ -261,6 +273,8 @@ class MapeKController:
                           created_at=iso(t), removed_at=iso(t), decision_id=decision_id, simulated=int(simulated),
                           error=str(e))
             return "failed", str(e)
+        log.info("decoy %s deployed (profile %s, service %s:%s), waiting for readiness", name, profile,
+                 info["service_ip"], info["port"])
         db.insert_row(c, "decoys", name=name, profile=profile, namespace=self.d["namespace"], status="deploying",
                       replicas=1, port=info["port"], service_ip=info["service_ip"], created_at=iso(t),
                       expires_at=iso(t + timedelta(seconds=self.d["decoy_ttl_seconds"])), decision_id=decision_id,
@@ -314,11 +328,15 @@ class MapeKController:
             return "failed"
         self._collect_for(c, name)  # keep the last interactions before the pods disappear
         try:
-            mgr.remove(name)
+            existed = mgr.remove(name)
         except DecoyError as e:
             log.error("remove %s failed: %s", name, e)
+            self.last_error = str(e)
             return "failed"
         row = c.execute("SELECT * FROM decoys WHERE name = ? AND status IN ('deploying', 'active')", (name,)).fetchone()
+        if not existed and row is None:
+            return "not_found"
+        log.info("decoy %s removed (%s): %s", name, status, reason)
         if row:
             db.update_row(c, "decoys", row["id"], status=status, removed_at=iso(now_utc()))
         self._record(c, cycle_id, trigger=trigger, action="remove", decoy_profile=row["profile"] if row else None,
@@ -367,9 +385,11 @@ class MapeKController:
                 out["vanished"].append(r["name"])
                 continue
             if r["status"] == "deploying":
-                if k["ready_replicas"] >= 1:
+                reachable = k.get("service", True) and (k.get("endpoints") is None or k["endpoints"] >= 1)
+                if k["ready_replicas"] >= 1 and reachable:
                     secs = (now - parse(r["created_at"])).total_seconds()
                     db.update_row(c, "decoys", r["id"], status="active", ready_at=iso(now), deploy_seconds=secs)
+                    log.info("decoy %s ready after %.1fs (%s endpoint(s))", r["name"], secs, k.get("endpoints"))
                     out["ready"].append(r["name"])
                 elif (now - parse(r["created_at"])).total_seconds() > self.d["deploy_timeout_seconds"]:
                     mgr.remove(r["name"])
@@ -446,8 +466,9 @@ class MapeKController:
         if not DECOY_NAME_RE.match(name):
             raise DecoyError(f"invalid decoy name {name!r}")
         with self._lock, self._conn() as c:
+            self.last_error = None
             res = self.remove_decoy(c, name, "removed", None, "manual", "manual removal from dashboard/API")
-            return {"name": name, "result": res}
+            return {"name": name, "result": res, "error": self.last_error or (self.manager_error if res == "failed" else None)}
 
     def submit_simulated_event(self, attack_class: str, confidence: float, src_ip: str | None = None,
                                count: int = 1, note: str = "") -> int:
@@ -487,7 +508,15 @@ class MapeKController:
         with self._conn() as c:
             last = db.kv_get(c, "last_cycle")
             decoys = db.query_df(c, f"SELECT * FROM decoys WHERE status IN {ACTIVE} ORDER BY created_at")
+        cluster, cluster_error = None, None
+        mgr = self.manager
+        if mgr is not None:
+            try:
+                cluster = list(mgr.list_decoys().values())   # what Kubernetes actually has right now
+            except Exception as e:  # noqa: BLE001
+                cluster_error = str(e)[:300]
         return {
+            "cluster_decoys": cluster, "cluster_error": cluster_error,
             "enabled": self.enabled, "stage": self.stage, "loop_running": bool(self._thread and self._thread.is_alive()),
             "kubernetes_available": self.manager is not None, "kubernetes_error": self.manager_error,
             "last_cycle": json.loads(last) if last else None,

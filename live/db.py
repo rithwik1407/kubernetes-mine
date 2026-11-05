@@ -18,7 +18,7 @@ SCHEMA = """
 CREATE TABLE IF NOT EXISTS captures (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pcap_file TEXT UNIQUE NOT NULL, interface TEXT, started_at TEXT, ended_at TEXT,
-    duration_s REAL, packets INTEGER, bytes INTEGER,
+    duration_s REAL, window_s REAL, packets INTEGER, bytes INTEGER,
     status TEXT NOT NULL, csv_file TEXT, flows INTEGER,
     conversion_s REAL, prediction_ms REAL, pipeline_s REAL, next_window_s REAL, error TEXT,
     updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
@@ -30,7 +30,8 @@ CREATE TABLE IF NOT EXISTS detections (
     src_ip TEXT, src_port INTEGER, dst_ip TEXT, dst_port INTEGER, protocol INTEGER,
     predicted_class TEXT NOT NULL, confidence REAL NOT NULL, is_malicious INTEGER NOT NULL,
     capture_file TEXT, source TEXT NOT NULL, processing_time_ms REAL, detected_at TEXT NOT NULL,
-    true_label TEXT, model TEXT, simulated INTEGER NOT NULL DEFAULT 0
+    true_label TEXT, model TEXT, simulated INTEGER NOT NULL DEFAULT 0,
+    flow_duration_us REAL, packets INTEGER, bytes INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_det_detected_at ON detections(detected_at);
 CREATE INDEX IF NOT EXISTS idx_det_malicious   ON detections(is_malicious);
@@ -42,7 +43,7 @@ CREATE TABLE IF NOT EXISTS behavior_alerts (
     alert_type TEXT NOT NULL DEFAULT 'flow_burst',
     src_ip TEXT NOT NULL, dst_ip TEXT, dst_port INTEGER, protocol INTEGER,
     flows INTEGER, rate_per_s REAL, window_s REAL,
-    ml_malicious_flows INTEGER, ml_classes TEXT, detected_at TEXT NOT NULL
+    ml_malicious_flows INTEGER, ml_classes TEXT, detected_at TEXT NOT NULL, distinct_ports INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS simulated_events (
@@ -80,6 +81,13 @@ CREATE TABLE IF NOT EXISTS interactions (
 );
 CREATE INDEX IF NOT EXISTS idx_int_ts ON interactions(ts);
 
+CREATE TABLE IF NOT EXISTS window_transitions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL, pcap_file TEXT,
+    previous_s REAL, next_s REAL NOT NULL, rule TEXT NOT NULL, reason TEXT NOT NULL,
+    changed INTEGER NOT NULL DEFAULT 0, evidence TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_win_created ON window_transitions(created_at);
+
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
 
@@ -87,6 +95,7 @@ DETECTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious", "capture_file", "source",
     "processing_time_ms", "detected_at", "true_label", "model",
+    "flow_duration_us", "packets", "bytes",
 ]
 
 
@@ -103,11 +112,25 @@ def connect(path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
     conn.executescript(SCHEMA)
+    _migrate(conn)
     try:
         yield conn
         conn.commit()
     finally:
         conn.close()
+
+
+_MIGRATIONS = {"captures": {"window_s": "REAL"}, "behavior_alerts": {"distinct_ports": "INTEGER"},
+               "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER"}}
+
+
+def _migrate(conn: sqlite3.Connection) -> None:
+    """Add columns introduced after a database was first created (SQLite has no IF NOT EXISTS for columns)."""
+    for table, cols in _MIGRATIONS.items():
+        have = {r[1] for r in conn.execute(f"PRAGMA table_info({table})")}
+        for col, typ in cols.items():
+            if col not in have:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
 
 
 def _clean(v):
@@ -157,8 +180,8 @@ def insert_detections(conn: sqlite3.Connection, pred: pd.DataFrame, capture_id: 
                       simulated: bool = False) -> int:
     if pred.empty:
         return 0
-    rows = [(capture_id, *(_clean(r[c]) for c in DETECTION_COLUMNS), int(simulated))
-            for r in pred[DETECTION_COLUMNS].to_dict(orient="records")]
+    rows = [(capture_id, *(_clean(r.get(c)) for c in DETECTION_COLUMNS), int(simulated))
+            for r in pred.reindex(columns=DETECTION_COLUMNS).to_dict(orient="records")]
     cols = ["capture_id", *DETECTION_COLUMNS, "simulated"]
     conn.executemany(f"INSERT INTO detections ({', '.join(cols)}) VALUES ({', '.join('?' * len(cols))})", rows)
     return len(rows)

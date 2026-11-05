@@ -20,7 +20,18 @@ PREDICTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious",
     "capture_file", "source", "processing_time_ms", "detected_at", "true_label", "model",
+    "flow_duration_us", "packets", "bytes",
 ]
+
+
+def _num(df: pd.DataFrame, canon_names: tuple[str, ...]) -> pd.Series:
+    """First column whose canonical name matches (CICFlowMeter builds name them differently)."""
+    from live.schema import _canon
+    canon = _canon()
+    for c in df.columns:
+        if canon(c) in canon_names:
+            return pd.to_numeric(df[c], errors="coerce")
+    return pd.Series(np.nan, index=df.index)
 VALID_SOURCES = ("upload", "pcap", "live", "unknown")
 
 
@@ -93,6 +104,10 @@ class FlowPredictor:
             "detected_at": datetime.now(timezone.utc).isoformat(),
             "true_label": _col(df, LABEL, "string"),
             "model": self.name,
+            # flow facts kept for the dashboard only (identifiers and these are never model inputs here)
+            "flow_duration_us": _num(df, ("flowduration",)),
+            "packets": _num(df, ("totalfwdpackets",)).fillna(0) + _num(df, ("totalbackwardpackets",)).fillna(0),
+            "bytes": _num(df, ("totallengthoffwdpackets",)).fillna(0) + _num(df, ("totallengthofbwdpackets",)).fillna(0),
         }, index=df.index)
         self.last_report = {"rows": int(len(df)), "missing_features": missing, "batch_ms": batch_ms}
         return out.reset_index(drop=True)

@@ -18,9 +18,14 @@ detection:
 # like a benign request; what gives a scan away is many flows from one source to
 # one service in a window. Lab measurement (friend's repo): recon pod 28-57
 # flows / 10 s window to a service; benign generator 0-3; kubelet 1.
+# The rate test makes the threshold scale with the adaptive window: at 1.5 flows/s
+# a 10 s window needs 15 flows (the value calibrated on the lab), a 3 s window 5.
 behavior:
-  min_flows: 15
-  min_rate_per_s: 1.0
+  min_flows: 5
+  min_rate_per_s: 1.5
+  # Port sweep: one source reaching >= sweep_min_ports different ports of one host
+  # in a window (a port scan has one flow per port, so the per-port rule misses it).
+  sweep_min_ports: 10
   protocols: [6]                     # TCP
   ignore_sources: []
 
@@ -29,12 +34,24 @@ capture:
   tcpdump: /usr/bin/tcpdump
   bpf_filter: ""
   snaplen: 0
+  # Adaptive observation window (live/window.py). After every window the next size
+  # is chosen from measured evidence, first matching rule wins:
+  #   R1 threat     malicious ML flows (confidence >= evidence_confidence) or a flow
+  #                 burst in the latest scored window -> threat_seconds
+  #   R2 high_rate  packets/s >= high_rate_pps -> one size smaller
+  #   R3 calm       calm_windows scored windows without threat AND packets/s <=
+  #                 low_rate_pps -> one size larger
+  #   R4 hold       otherwise keep the current size
   window:
-    default_seconds: 10
-    min_seconds: 5
-    max_seconds: 30
-    high_rate_pps: 200               # busier than this -> next window is min_seconds
-    low_rate_pps: 20                 # quieter than this -> next window is max_seconds
+    sizes: [1, 3, 5, 10]             # allowed window lengths in seconds
+    default_seconds: 5               # first window after capture starts
+    min_seconds: 1
+    max_seconds: 10
+    high_rate_pps: 200
+    low_rate_pps: 20
+    threat_seconds: 3                # R1 target; 1 s windows split most TCP flows
+    calm_windows: 3
+    evidence_confidence: 0.6
   retain_pcaps: 500
   state_file: captures/capture_state.json
   pid_file: captures/capture.pid
@@ -57,13 +74,18 @@ traffic_lab:
     nodered:  {host: nodered.target-apps.svc.cluster.local,  port: 1880}
     grafana:  {host: grafana.target-apps.svc.cluster.local,  port: 3000}
     influxdb: {host: influxdb.target-apps.svc.cluster.local, port: 8086}
+  job_deadline_seconds: 300
+  # default_target is a key of `targets`; env is passed to the generator pod.
+  # expect_class is what the scenario is meant to resemble, not a promise: the
+  # dashboard compares it with what the model actually predicted for the run.
   scenarios:
-    benign:      {mode: benign,       detectable: false, expect_class: BENIGN,     description: Low-rate browsing and health checks against the lab services}
-    web_recon:   {mode: web_recon,    detectable: false, expect_class: BENIGN,     description: Bounded HTTP path enumeration of Node-RED (caught by the burst detector, not the model)}
-    port_scan:   {mode: port_scan,    detectable: true,  expect_class: PortScan,   description: TCP connect scan across a port range on a lab target}
-    slow_dos:    {mode: slow_dos,     detectable: true,  expect_class: DoS,        description: Many slow partial HTTP connections held open against a target}
-    brute_force: {mode: brute_force,  detectable: true,  expect_class: BruteForce, description: Repeated login attempts against an SSH/HTTP test target}
-    web_attack:  {mode: web_attack,   detectable: true,  expect_class: WebAttack,  description: HTTP requests carrying SQLi / XSS-style payloads at a web target}
+    benign:      {mode: benign,      default_target: nodered,  detectable: false, expect_class: BENIGN,     env: {MIN_DELAY: "0.5", MAX_DELAY: "1.5"}, description: "Low-rate browsing and health checks against the lab services"}
+    web_recon:   {mode: web_recon,   default_target: nodered,  detectable: false, expect_class: BENIGN,     description: "Bounded HTTP path enumeration of Node-RED (caught by the flow-burst detector, not the model)"}
+    port_scan:   {mode: port_scan,   default_target: nodered,  detectable: true,  expect_class: PortScan,   env: {PORT_START: "1", PORT_END: "1024", SCAN_TIMEOUT: "1"}, description: "TCP connect scan of ports 1-1024 on the pod behind a lab service"}
+    slow_dos:    {mode: slow_dos,    default_target: nodered,  detectable: true,  expect_class: DoS,        env: {SLOW_CONNS: "150", SLOW_HOLD_S: "20"}, description: "Many slow partial HTTP connections held open against a lab service"}
+    brute_force: {mode: brute_force, default_target: grafana,  detectable: true,  expect_class: BruteForce, env: {LOGIN_PATH: /login}, description: "Repeated failed logins against the Grafana login API"}
+    web_attack:  {mode: web_attack,  default_target: nodered,  detectable: true,  expect_class: WebAttack,  description: "HTTP requests carrying SQLi / XSS-style strings at a lab web service"}
+    decoy_probe: {mode: decoy_probe,                           detectable: false, expect_class: null,       description: "Requests to the deployed decoy services, to exercise interaction logging"}
 
 deception:
   namespace: ids-deception
@@ -89,12 +111,12 @@ deception:
     scale_up_interactions: 20
   scale_on_repeat: [web-portal]
   profiles:
-    web-portal:    {port: 80,   description: Generic web portal for scans and web attacks}
-    ssh-sentinel:  {port: 2222, description: Fake SSH banner service for brute-force follow-up}
-    nodered:       {port: 1880, description: Simulated Node-RED flow editor}
-    grafana:       {port: 3000, description: Simulated metrics dashboard}
-    influxdb:      {port: 8086, description: Simulated time-series database}
-    k8s-inventory: {port: 8080, description: Simulated Kubernetes resource inventory}
+    web-portal:    {port: 80,   description: "Generic web portal for scans and web attacks"}
+    ssh-sentinel:  {port: 2222, description: "Fake SSH banner service for brute-force follow-up"}
+    nodered:       {port: 1880, description: "Simulated Node-RED flow editor"}
+    grafana:       {port: 3000, description: "Simulated metrics dashboard"}
+    influxdb:      {port: 8086, description: "Simulated time-series database"}
+    k8s-inventory: {port: 8080, description: "Simulated Kubernetes resource inventory"}
   # CIC model class -> decoy profiles (first preferred; reordered by past engagement).
   attack_policy:
     PortScan:   [web-portal, k8s-inventory]
@@ -109,4 +131,5 @@ deception:
     "3000": [grafana]
     "8086": [influxdb]
     "22":   [ssh-sentinel]
+    sweep:  [web-portal, k8s-inventory]    # port sweep (scan across many ports)
     default: [web-portal]

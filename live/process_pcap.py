@@ -70,6 +70,13 @@ def process_pcap(pcap: Path, predictor: FlowPredictor, cfg: dict[str, Any] | Non
         fields.update(status="classified", prediction_ms=predictor.last_report["batch_ms"],
                       pipeline_s=time.monotonic() - ref, error=None)
         db.upsert_capture(conn, pcap.name, **fields)
+    ev_conf = float(cfg["capture"]["window"].get("evidence_confidence", 0.6))
+    strong = pred[pred["is_malicious"].astype(bool) & (pred["confidence"] >= ev_conf)]
+    summary["evidence"] = {
+        "malicious_flows": int(len(strong)), "bursts": int(len(bursts)),
+        "top_class": strong["predicted_class"].value_counts().idxmax() if len(strong) else None,
+        "max_confidence": float(strong["confidence"].max()) if len(strong) else None,
+    }
     summary.update(
         status="classified", detections=stored, malicious=int(pred["is_malicious"].sum()),
         classes=pred["predicted_class"].value_counts().to_dict(),

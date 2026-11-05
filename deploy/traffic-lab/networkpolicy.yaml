@@ -1,5 +1,7 @@
-# Traffic-lab pods may reach only the lab target services, the decoys in
-# ids-deception, and cluster DNS. Any other egress fails (Network unreachable).
+# Traffic-lab pods may reach only the lab target namespace (any TCP port, so the
+# port_scan scenario gets real open/closed answers instead of silent drops), the
+# decoys in ids-deception, and cluster DNS. Any other egress is dropped, so the
+# generator cannot reach anything outside the lab.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -15,10 +17,7 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: target-apps
       ports:
-        - {protocol: TCP, port: 1880}
-        - {protocol: TCP, port: 3000}
-        - {protocol: TCP, port: 8086}
-        - {protocol: TCP, port: 22}
+        - {protocol: TCP, port: 1, endPort: 65535}
     - to:
         - namespaceSelector:
             matchLabels:

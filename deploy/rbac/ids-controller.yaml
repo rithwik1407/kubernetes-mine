@@ -22,7 +22,7 @@ rules:
   - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","list","watch","create","patch","delete"]}
   - {apiGroups: ["apps"], resources: ["deployments/scale"], verbs: ["get","patch"]}
   - {apiGroups: [""], resources: ["services"], verbs: ["get","list","create","delete"]}
-  - {apiGroups: [""], resources: ["pods","events"], verbs: ["get","list"]}
+  - {apiGroups: [""], resources: ["pods","events","endpoints"], verbs: ["get","list"]}
   - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -40,6 +40,8 @@ rules:
   - {apiGroups: [""], resources: ["pods","events","services"], verbs: ["get","list"]}
   - {apiGroups: [""], resources: ["pods/log"], verbs: ["get"]}
   - {apiGroups: ["apps"], resources: ["deployments"], verbs: ["get","list"]}
+  # start/stop the continuous benign generator (scale 0/1), nothing else
+  - {apiGroups: ["apps"], resources: ["deployments/scale"], resourceNames: ["traffic-benign"], verbs: ["get","patch"]}
   # read-only check that the generator script is deployed before launching a Job
   - {apiGroups: [""], resources: ["configmaps"], resourceNames: ["traffic-generator-script"], verbs: ["get"]}
 ---
@@ -53,7 +55,7 @@ apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata: {name: ids-viewer, namespace: target-apps}
 rules:
-  - {apiGroups: ["","apps"], resources: ["pods","services","events","deployments"], verbs: ["get","list"]}
+  - {apiGroups: ["","apps"], resources: ["pods","services","events","deployments","endpoints"], verbs: ["get","list"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
@@ -66,6 +68,8 @@ kind: ClusterRole
 metadata: {name: ids-cluster-viewer}
 rules:
   - {apiGroups: [""], resources: ["nodes","namespaces"], verbs: ["get","list"]}
+  # CPU / memory from metrics-server (kubectl top), read-only
+  - {apiGroups: ["metrics.k8s.io"], resources: ["nodes","pods"], verbs: ["get","list"]}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

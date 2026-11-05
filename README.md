@@ -6,13 +6,17 @@ bursts, and runs a MAPE-K controller that deploys isolated decoys for confident
 attacks — all driven from a web dashboard, including a traffic lab that generates
 the attack traffic to test detection.
 
-![Live SOC dashboard](docs/screenshots/live_overview.png)
+![SOC dashboard](docs/screenshots/overview.png)
+
+Full audit results: **[docs/verification-report.md](docs/verification-report.md)**.
 
 ## Two ways to use it
 
-One dashboard (`/`) with a left sidebar: **Overview**, **Live traffic** (target-pod
-status, one-click *Generate & capture*, live detections), **Traffic generator**,
-**Deception**, **Cluster & pods** and the **CSV scorer & model** page. The live parts
+One dark SOC dashboard (`/`) with a left sidebar: **Overview**, **Live Traffic**,
+**Threat Detection**, **Adaptive Window**, **Traffic Lab** (one-click *Generate &
+capture*, verified from the generator log), **Deception**, **Kubernetes**, **ML Model**,
+**System** (health, resources, logs, API requests) and the **CSV scorer**. Every value
+comes from the API, and missing pieces are shown as unavailable, not faked. The live parts
 need a K3s cluster and CICFlowMeter and should be run in WSL2/Linux; the CSV scorer
 needs nothing but Python.
 
@@ -73,12 +77,23 @@ false alarms 3.5× with no change to the CIC benchmark. Per-class details:
 - **The model** classifies each flow into BENIGN or one of six attack families
   (DoS, DDoS, PortScan, BruteForce, WebAttack, Bot). It is strong on volumetric
   and payload-bearing attacks.
-- **The flow-burst detector** catches reconnaissance, which the model cannot:
+- **The behaviour rules** (flow bursts and port sweeps) catch reconnaissance, which the model cannot:
   one scan request looks like one benign request, but a scan opens many flows
   from one source to one service in a window. Both feed the controller.
 - **The MAPE-K controller** deploys decoys for confident attacks and for flow
   bursts, mapped to the attack class or the targeted port. Benign traffic never
   triggers a decoy.
+
+**Known limitation (measured):** on this lab's own attack traffic, the CIC-IDS2017
+model scores the flows BENIGN. The traffic fingerprints differ from the dataset
+(connect() scan vs nmap SYN, a different CICFlowMeter build), so the behaviour rules
+are what catch the lab attacks today. Retraining on labelled lab flows needs
+`data/cic-ids2017/`. See the [verification report](docs/verification-report.md).
+
+## Tests
+
+`python -m pytest` (99 tests, no cluster), `python scripts/check_api.py` (every
+endpoint), plus opt-in cluster and browser suites. See [docs/live-system.md](docs/live-system.md#tests).
 
 ## Credit
 

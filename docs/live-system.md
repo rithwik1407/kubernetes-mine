@@ -12,19 +12,19 @@ one in the friend's project.
    brute_force / web_attack / recon          │
             │                                │
             └──────────── cni0 bridge ───────┘
-                          │ tcpdump (adaptive 5/10/30 s windows)
+                          │ tcpdump (adaptive 1/3/5/10 s windows, rules R1–R4)
                           ▼
      PCAP ─► CICFlowMeter ─► flow CSV ─► CIC-IDS2017 model ─► detections
-                                   └────► flow-burst detector
+                                   └────► flow-burst + port-sweep detector
                           ▼
             SQLite knowledge base ◄──► MAPE-K controller ─► decoys (ids-deception)
                           ▲                                      │ request logs
                           └───────────── interactions ◄──────────┘
-            FastAPI backend ◄── live SOC dashboard (/live)
+            FastAPI backend ◄── SOC dashboard (/)
 ```
 
-- **Detection lags traffic by about one window** (5–30 s) plus ~1 s of pipeline
-  time. This is window-based, not packet-by-packet real time.
+- **Detection lags traffic by about one window** (1–10 s) plus ~0.7 s of pipeline
+  time (measured). This is window-based, not packet-by-packet real time.
 - Everything degrades gracefully: with no cluster the dashboard still shows stored
   records and reports "Kubernetes unavailable".
 
@@ -62,10 +62,12 @@ kubeconfig (`$KUBECONFIG` or `~/.kube/config`) and shows which identity it uses.
 - A single-node K3s cluster, with `~/.kube/config` readable (`export KUBECONFIG=$HOME/.kube/config`).
 - The three target apps in the `target-apps` namespace (Node-RED :1880, Grafana
   :3000, InfluxDB :8086). Reuse an existing deployment or create your own.
-- A CICFlowMeter build that converts a PCAP directory to flow CSVs. The
-  [GintsEngelen fork](https://github.com/GintsEngelen/CICFlowMeter) (the one that
-  produced CIC-IDS2017) is recommended; set its paths in `config/live.yaml`
-  under `cicflowmeter`.
+- A CICFlowMeter build that converts a PCAP directory to flow CSVs. `setup_lab.sh`
+  builds the [GintsEngelen fork](https://github.com/GintsEngelen/CICFlowMeter) into
+  `~/CICFlowMeter` (Java 17 + Maven). It also needs **`libpcap-dev`**: without
+  `libpcap.so` the converter fails with `UnsatisfiedLinkError`, and the System page
+  says so. Paths are in `config/live.yaml` under `cicflowmeter`.
+- If the target apps are missing, `setup_lab.sh` applies `deploy/target-apps/target-apps.yaml`.
 - `tcpdump` with capture capability without sudo:
   `sudo setcap cap_net_raw,cap_net_admin=eip /usr/bin/tcpdump`
   (undo with `sudo setcap -r /usr/bin/tcpdump`).
@@ -90,14 +92,30 @@ touch `target-apps`, secrets or `kube-system`.
 ## Run it
 
 ```bash
-cd dashboard
-uvicorn app:app --host 127.0.0.1 --port 8000      # open http://localhost:8000/live
+bash scripts/run_dashboard.sh                     # open http://localhost:8000
 ```
 
-Then, on the **Live traffic** tab, press **Start capture**. On the **Traffic lab**
-tab, launch a scenario (e.g. *port scan* or *slow dos*) and watch the detections
-and flow bursts appear on **Overview**. On the **Deception** tab, press **Enable**
-and the controller deploys decoys for the confident detections and bursts.
+Pages: Overview, Live Traffic, Threat Detection, Adaptive Window, Traffic Lab,
+Deception, Kubernetes, ML Model, System (health, resources, logs, API requests) and
+the CSV scorer. On **Traffic Lab**, press **Generate & capture** for a scenario. Capture
+starts if needed, and the run tracker only marks traffic done once the generator's own
+log proves the requests were answered. On **Deception**, press **Enable** and the
+controller deploys decoys for confident detections, bursts and port sweeps.
+
+## Adaptive observation window
+
+The window is 1, 3, 5 or 10 s (it starts at 5). After each window the next size comes
+from the evidence of the last scored window, and the first matching rule wins:
+
+| Rule | When | Next |
+|---|---|---|
+| R1_threat | malicious flow with confidence ≥ 0.6, or any burst/sweep | 3 s (or stay if shorter) |
+| R2_high_rate | ≥ 200 pkt/s | one size smaller |
+| R3_calm | ≤ 20 pkt/s for 3 windows in a row | one size larger |
+| R4_hold | otherwise | unchanged |
+
+Deterministic, with no randomness. Every decision is stored with its evidence in
+`window_transitions`. Thresholds are under `capture.window` in `config/live.yaml`.
 
 Capture and processing can also be driven from the command line:
 
@@ -117,10 +135,15 @@ labelled traffic for measuring detection.
 |---|---|---|
 | benign | low-rate browsing / health checks | BENIGN |
 | web_recon | bounded HTTP path enumeration | BENIGN per flow; caught by the burst detector |
-| port_scan | TCP connect scan over a port range | PortScan |
-| slow_dos | many slow, partial HTTP connections | DoS |
-| brute_force | repeated login / SSH connect attempts | BruteForce |
-| web_attack | SQLi/XSS-style strings in query params | WebAttack |
+| port_scan | TCP connect scan of the pod IP | PortScan; in practice caught by the port-sweep rule |
+| slow_dos | many slow, partial HTTP connections | DoS; in practice caught by bursts |
+| brute_force | repeated JSON logins to Grafana | BruteForce; in practice caught by bursts |
+| web_attack | SQLi/XSS-style strings in query params | WebAttack; in practice caught by bursts |
+| decoy_probe | requests to the live decoys | produces decoy interactions |
+
+In the verification run, the CIC-IDS2017 model scored the lab's attack flows as BENIGN.
+The behaviour rules caught every attack run. See
+[verification-report.md](verification-report.md#4-the-honest-ml-finding).
 
 No payload is executed anywhere; brute_force and web_attack send signature-like
 strings to a test endpoint, never real credentials or exploits.
@@ -132,7 +155,8 @@ decoy profile from `config/live.yaml`:
 
 | Evidence | Decoy profile |
 |---|---|
-| PortScan, burst to an unmapped port | web-portal, k8s-inventory |
+| PortScan, port sweep | web-portal, k8s-inventory |
+| burst to an unmapped port | web-portal |
 | BruteForce, burst to :22 | ssh-sentinel |
 | WebAttack | web-portal, nodered |
 | DoS / DDoS / Bot | web-portal |
@@ -145,10 +169,13 @@ traffic is ever redirected.
 ## Tests
 
 ```bash
-python -m pytest -q        # 22 tests
-python scripts/check_api.py   # checks every API endpoint (run this before opening the UI); no cluster required
+python -m pytest                     # 99 unit + API tests, no cluster needed
+python scripts/check_api.py          # every endpoint (53 checks)
+IDS_K8S_TESTS=1 python -m pytest tests/test_k8s_integration.py   # real Job + real decoy
+IDS_UI_URL=http://127.0.0.1:8000 python -m pytest tests/ui        # Playwright, 14 checks
 ```
 
-They cover the CSV schema quirks and feature aliasing, flow-burst detection, the
-SQLite store, the MAPE-K decisions (with a fake Kubernetes manager), and the
-bounded, locked-down traffic-lab Job spec.
+They cover the CSV schema and feature aliasing, the window policy, job naming, target
+restriction and log verification, flow bursts and port sweeps, PCAP edge cases, DB
+migration, the MAPE-K decisions, API status codes with no cluster, and the dashboard
+in a real browser. Results: [verification-report.md](verification-report.md).

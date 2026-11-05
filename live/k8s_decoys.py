@@ -128,6 +128,11 @@ class DecoyManager:
     def list_decoys(self) -> dict[str, dict[str, Any]]:
         deps = self.apps.list_namespaced_deployment(self.ns, label_selector=SELECTOR).items
         svcs = {s.metadata.name: s for s in self.core.list_namespaced_service(self.ns, label_selector=SELECTOR).items}
+        try:
+            eps = {e.metadata.name: sum(len(ss.addresses or []) for ss in (e.subsets or []))
+                   for e in self.core.list_namespaced_endpoints(self.ns, label_selector=SELECTOR).items}
+        except self._api_exc:   # older RBAC without endpoints read: fall back to pod readiness only
+            eps = None
         out = {}
         for d in deps:
             name = d.metadata.name
@@ -138,6 +143,9 @@ class DecoyManager:
                 "created": d.metadata.creation_timestamp.isoformat() if d.metadata.creation_timestamp else None,
                 "service_ip": svc.spec.cluster_ip if svc else None,
                 "port": svc.spec.ports[0].port if svc and svc.spec.ports else None,
+                "service": svc is not None,
+                # Ready addresses behind the Service: the decoy is reachable only when this is > 0.
+                "endpoints": None if eps is None else eps.get(name, 0),
             }
         return out
 

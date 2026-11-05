@@ -16,7 +16,8 @@ from live import capture as cap
 from live import db
 from live.config import load_config
 from live.k8s_status import targets_status
-from live.trafficlab import TrafficLabError, check_ready, launch, list_jobs
+from live.cicflowmeter import support as cfm_support
+from live.trafficlab import TrafficLabError, check_ready, job_detail, launch, list_jobs
 
 KV_KEY = "pipeline_runs"
 KEEP = 20
@@ -32,6 +33,7 @@ def preflight(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     tg = targets_status(cfg)
     lab = check_ready(cfg) if tg["connected"] else {"ready": False, "reason": tg.get("error", "cluster unreachable")}
     sup = cap.support(cfg)
+    cfm = cfm_support(cfg)
     state = cap.read_state(cfg)
     steps = [
         {"id": "cluster", "label": "Kubernetes reachable", "ok": tg["connected"],
@@ -41,11 +43,13 @@ def preflight(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         {"id": "lab", "label": "Traffic lab deployed", "ok": bool(lab.get("ready")),
          "detail": lab.get("reason"), "fix": lab.get("fix")},
         {"id": "capture", "label": "Capture available on this machine", "ok": sup["supported"], "detail": sup["reason"]},
+        {"id": "cicflowmeter", "label": "CICFlowMeter ready", "ok": cfm["supported"], "detail": cfm["reason"]},
         {"id": "running", "label": "Capture running", "ok": bool(state.get("running")), "detail": state.get("status")},
     ]
     return {"steps": steps, "targets": tg, "capture_supported": sup["supported"],
             "capture_running": bool(state.get("running")),
-            "can_generate": tg["connected"] and bool(lab.get("ready"))}
+            "can_generate": tg["connected"] and bool(lab.get("ready")),
+            "can_detect": sup["supported"] and cfm["supported"]}
 
 
 def _runs(conn) -> list[dict[str, Any]]:
@@ -90,34 +94,61 @@ def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> 
         run = next((r for r in runs if r["id"] == run_id), runs[0]) if run_id else runs[0]
         t0 = run["started_at"]
         caps = [dict(r) for r in conn.execute(
-            "SELECT status, packets FROM captures WHERE started_at >= ? OR ended_at >= ?", (t0, t0))]
+            "SELECT pcap_file, status, packets, error FROM captures WHERE started_at >= ? OR ended_at >= ?", (t0, t0))]
         det = [dict(r) for r in conn.execute(
             "SELECT predicted_class, COUNT(*) n, SUM(is_malicious) mal FROM detections WHERE detected_at >= ? "
             "GROUP BY predicted_class", (t0,))]
         bursts = conn.execute("SELECT COUNT(*) FROM behavior_alerts WHERE detected_at >= ?", (t0,)).fetchone()[0]
         decisions = conn.execute("SELECT COUNT(*) FROM decisions WHERE created_at >= ? AND action!='none'", (t0,)).fetchone()[0] \
             if _has(conn, "decisions") else 0
-    jobs = {j.get("name"): j for j in list_jobs(cfg) if "name" in j}
-    job = jobs.get(run["job"], {})
+    try:
+        jobs = {j["name"]: j for j in list_jobs(cfg)}
+        job = jobs.get(run["job"], {"state": "deleted or expired"})
+    except TrafficLabError as e:
+        job = {"state": "unknown", "error": str(e)}
+    verification = None
+    if job.get("name"):
+        try:
+            verification = job_detail(job["name"], cfg)["verification"]
+        except Exception as e:  # noqa: BLE001
+            verification = {"verified": False, "error": str(e)[:200]}
     scored = [c for c in caps if c["status"] in cap.DONE_STATUSES]
+    failed = [c for c in caps if c["status"] == "failed"]
     flows = sum(d["n"] for d in det)
     svc = cap.read_state(cfg)
     stages = [
-        {"id": "job", "label": "Traffic generated", "state": _job_stage(job.get("state")), "detail": job.get("state", "unknown")},
+        {"id": "job", "label": "Traffic generated (verified from generator log)",
+         "state": _traffic_stage(job.get("state"), verification),
+         "detail": f"Job {job.get('state', 'unknown')}" + (
+             f"; {verification.get('ok', 0)} answered, {verification.get('errors', 0)} failed"
+             if verification and "ok" in verification else "")},
         {"id": "capture", "label": "Packets captured", "state": "done" if caps else ("active" if svc.get("running") else "idle"),
          "detail": f"{len(caps)} window(s), {sum(c['packets'] or 0 for c in caps):,} packets"},
-        {"id": "score", "label": "Flows scored", "state": "done" if flows else ("active" if caps else "idle"),
-         "detail": f"{len(scored)} window(s) processed, {flows:,} flows"},
+        {"id": "score", "label": "Flows scored",
+         "state": "done" if flows else ("error" if failed and not scored else ("active" if caps else "idle")),
+         "detail": f"{len(scored)} window(s) processed, {flows:,} flows"
+                   + (f"; {len(failed)} window(s) FAILED: {failed[-1]['error']}" if failed else "")},
         {"id": "detect", "label": "Detections", "state": "done" if (bursts or any(d["mal"] for d in det)) else ("active" if flows else "idle"),
          "detail": f"{sum(d['mal'] or 0 for d in det):,} malicious flows, {bursts} flow burst(s)"},
     ]
     return {"run": run, "job": job, "stages": stages, "capture_running": bool(svc.get("running")),
             "by_class": {d["predicted_class"]: d["n"] for d in det}, "bursts": bursts, "decisions": decisions,
-            "hint": _hint(run, stages, svc)}
+            "failed_windows": len(failed), "verification": verification, "hint": _hint(run, stages, svc)}
 
 
 def _has(conn, table: str) -> bool:
     return bool(conn.execute("SELECT 1 FROM sqlite_master WHERE name=?", (table,)).fetchone())
+
+
+def _traffic_stage(state: str | None, v: dict | None) -> str:
+    """'done' only when the generator log shows answered connections, never just because the Job exists."""
+    if state == "failed":
+        return "error"
+    if v and v.get("verified"):
+        return "done" if state == "succeeded" else "active"
+    if state == "succeeded":
+        return "error"          # finished without a single answered connection
+    return _job_stage(state)
 
 
 def _job_stage(state: str | None) -> str:
@@ -125,9 +156,13 @@ def _job_stage(state: str | None) -> str:
 
 
 def _hint(run, stages, svc) -> str:
-    if not svc.get("running") and not stages[1]["detail"].startswith(("1", "2", "3", "4", "5", "6", "7", "8", "9")):
+    if stages[2]["state"] == "error":
+        return "Captured windows could not be converted or scored; see the error above and the System page."
+    if stages[0]["state"] == "error":
+        return "The traffic Job failed; open it on the Traffic generator page to see the generator log."
+    if not svc.get("running") and stages[1]["state"] != "done":
         return "Capture is not running on this machine, so no packets are being recorded. Start it from a Linux/WSL dashboard."
     if stages[2]["state"] != "done":
-        return "Waiting for the next capture window to close (5–30 s) and be scored."
+        return "Waiting for the next capture window to close and be scored (window length is adaptive, 1–10 s)."
     return "Pipeline complete for this run." if stages[3]["state"] == "done" else \
         "Flows scored. This scenario is benign-like or below the burst threshold, so no alert was raised."

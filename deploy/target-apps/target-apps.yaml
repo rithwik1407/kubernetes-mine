@@ -1,0 +1,84 @@
+# The three lab target applications the traffic lab sends traffic to:
+# Node-RED (:1880), Grafana (:3000) and InfluxDB (:8086) in namespace target-apps.
+# Only needed when your cluster does not already run them; setup_lab.sh applies
+# this file only if the namespace has no such deployments.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: target-apps
+  labels: {kubernetes.io/metadata.name: target-apps, ids/role: target}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: nodered, namespace: target-apps, labels: {app: nodered}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: nodered}}
+  template:
+    metadata: {labels: {app: nodered}}
+    spec:
+      containers:
+        - name: nodered
+          image: nodered/node-red:4.0
+          ports: [{containerPort: 1880}]
+          readinessProbe: {tcpSocket: {port: 1880}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: nodered, namespace: target-apps}
+spec:
+  selector: {app: nodered}
+  ports: [{name: http, port: 1880, targetPort: 1880}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: grafana, namespace: target-apps, labels: {app: grafana}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: grafana}}
+  template:
+    metadata: {labels: {app: grafana}}
+    spec:
+      containers:
+        - name: grafana
+          image: grafana/grafana:11.3.0
+          ports: [{containerPort: 3000}]
+          readinessProbe: {httpGet: {path: /api/health, port: 3000}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 50m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 256Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: grafana, namespace: target-apps}
+spec:
+  selector: {app: grafana}
+  ports: [{name: http, port: 3000, targetPort: 3000}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata: {name: influxdb, namespace: target-apps, labels: {app: influxdb}}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: influxdb}}
+  template:
+    metadata: {labels: {app: influxdb}}
+    spec:
+      containers:
+        - name: influxdb
+          image: influxdb:2.7-alpine
+          ports: [{containerPort: 8086}]
+          readinessProbe: {httpGet: {path: /health, port: 8086}, periodSeconds: 5}
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: 500m, memory: 384Mi}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: influxdb, namespace: target-apps}
+spec:
+  selector: {app: influxdb}
+  ports: [{name: http, port: 8086, targetPort: 8086}]
