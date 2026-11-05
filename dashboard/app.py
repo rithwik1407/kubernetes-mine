@@ -8,6 +8,8 @@ Environment variables (optional):
     IDS_MODEL_DIR  folder with best_model.joblib + metrics.json + cm_*.png  (default ../models/cic-ids2017)
     IDS_PIPELINE   folder with prepare.py, for column-name mapping           (default ../ml)
 """
+import collections
+import hashlib
 import io
 import json
 import os
@@ -18,13 +20,18 @@ from pathlib import Path
 import joblib
 import numpy as np
 import pandas as pd
-from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi import FastAPI, File, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 HERE = Path(__file__).resolve().parent
 MODEL_DIR = Path(os.environ.get("IDS_MODEL_DIR", HERE.parent / "models" / "cic-ids2017"))
 sys.path.insert(0, str(Path(os.environ.get("IDS_PIPELINE", HERE.parent / "ml"))))
+sys.path.insert(0, str(HERE.parent))
+from live.logging_setup import configure as _configure_logging, get_logger  # noqa: E402
+
+_configure_logging("backend.log")
+log = get_logger("api")
 from prepare import canon, group_label  # noqa: E402  (same name mapping as training)
 
 bundle = joblib.load(MODEL_DIR / "best_model.joblib")
@@ -39,6 +46,31 @@ ID_COLS = {"srcip": "src", "sourceip": "src", "dstip": "dst", "destinationip": "
 
 app = FastAPI(title="K3s IDS dashboard")
 app.mount("/static", StaticFiles(directory=HERE / "static"), name="static")
+MAX_UPLOAD_BYTES = 200 * 2**20
+REQUEST_LOG: collections.deque = collections.deque(maxlen=1000)   # shown on the System page
+
+
+@app.middleware("http")
+async def record_requests(request: Request, call_next):
+    """Keep the last 1000 API calls (method, path, status, latency) and log failures."""
+    t0 = time.perf_counter()
+    try:
+        response = await call_next(request)
+        status = response.status_code
+    except Exception:
+        log.exception("unhandled error on %s %s", request.method, request.url.path)
+        status = 500
+        response = JSONResponse({"detail": "internal server error; see logs/backend.log"}, status_code=500)
+    ms = round((time.perf_counter() - t0) * 1000, 1)
+    path = request.url.path
+    if path.startswith("/api/") and path != "/api/system/requests":
+        REQUEST_LOG.append({"ts": time.strftime("%Y-%m-%dT%H:%M:%S", time.gmtime()), "method": request.method,
+                            "path": path, "status": status, "ms": ms})
+        if status >= 500:
+            log.error("%s %s -> %s (%.0f ms)", request.method, path, status, ms)
+        elif status >= 400:
+            log.warning("%s %s -> %s (%.0f ms)", request.method, path, status, ms)
+    return response
 
 # Live pipeline, traffic lab, deception and cluster endpoints. Optional: if the
 # live package or its deps are unavailable, the CSV scorer still runs.
@@ -55,12 +87,75 @@ except Exception as _live_err:  # noqa: BLE001
           "Fix: pip install -r requirements.txt  (needs pyyaml and kubernetes)\n" + "=" * 70, file=sys.stderr)
     traceback.print_exc()
     _LIVE_IMPORT_ERROR = str(_live_err)
+    log.error("live features disabled: %s", _live_err)
 
 
 @app.get("/api/features")
 def features():
     """Which parts of the dashboard are available in this deployment."""
-    return {"live": LIVE_ENABLED, "live_error": None if LIVE_ENABLED else _LIVE_IMPORT_ERROR}
+    return {"live": LIVE_ENABLED, "live_error": None if LIVE_ENABLED else _LIVE_IMPORT_ERROR,
+            "scorer_model": MODEL_DIR.name}
+
+
+def _model_info(model_dir: Path) -> dict:
+    """Everything the Model page shows, read from the saved artifacts (nothing is recomputed or invented)."""
+    bundle_path = model_dir / "best_model.joblib"
+    if not bundle_path.is_file():
+        raise HTTPException(404, f"no model artifact in {model_dir.name}")
+    m = json.loads((model_dir / "metrics.json").read_text())
+    best = m.get("best_model")
+    h = hashlib.sha256()
+    with open(bundle_path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    split = m.get("split_counts") or {}
+    train = split.get("train") or {}
+    rep_path = model_dir / "prepare_report.json"
+    if not rep_path.is_file():  # the lab model is built from the same prepared CIC data
+        rep_path = model_dir.parent / "cic-ids2017" / "prepare_report.json"
+    report = json.loads(rep_path.read_text()) if rep_path.is_file() else None
+    per = (m["models"].get(best) or {}).get("per_class", {})
+    min_reliable = 1000
+    return {
+        "name": model_dir.name, "best_model": best, "classes": m["classes"], "features": m.get("features"),
+        "n_features": len(m.get("features") or []),
+        "version": {"sha256": h.hexdigest()[:16], "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle_path.stat().st_mtime)),
+                    "size_mb": round(bundle_path.stat().st_size / 2**20, 1)},
+        "training_status": "trained (artifact loaded from disk)",
+        "split_counts": split, "train_samples": sum(train.values()), "test_samples": sum((split.get("test") or {}).values()),
+        "models": m["models"],
+        "dataset": None if not report else {k: report.get(k) for k in (
+            "rows_loaded", "raw_label_counts", "dropped_rare_labels", "rows_with_nan_or_inf_dropped",
+            "duplicate_rows_dropped", "conflicting_rows_dropped", "final_rows", "constant_columns_dropped")},
+        "reliability": [{"class": c, "train_samples": train.get(c), "f1": (per.get(c) or {}).get("f1"),
+                         "reliable": bool(train.get(c, 0) >= min_reliable and (per.get(c) or {}).get("f1", 0) >= 0.9)}
+                        for c in m["classes"]],
+        "reliability_rule": f"reliable = at least {min_reliable} training flows and test F1 >= 0.90",
+    }
+
+
+@app.get("/api/model")
+def model_info(which: str = "live"):
+    """The model used by the live pipeline (which=live) or by the CSV scorer (which=scorer)."""
+    if which == "scorer":
+        return _model_info(MODEL_DIR)
+    if which != "live":
+        raise HTTPException(400, "which must be 'live' or 'scorer'")
+    if not LIVE_ENABLED:
+        raise HTTPException(503, f"live features disabled: {_LIVE_IMPORT_ERROR}")
+    from live.config import get_path, load_config
+    return _model_info(get_path("model_dir", load_config()))
+
+
+@app.get("/api/model/cm/{model}/{name}")
+def model_cm_png(model: str, name: str):
+    """Confusion-matrix image of either model folder."""
+    if model not in ("cic-ids2017", "cic-ids2017-lab"):
+        raise HTTPException(404)
+    p = HERE.parent / "models" / model / f"cm_{Path(name).name}.png"
+    if not p.is_file():
+        raise HTTPException(404)
+    return FileResponse(p)
 
 
 @app.get("/")
@@ -182,7 +277,13 @@ def score_frame(df: pd.DataFrame, source: str) -> dict:
 
 @app.post("/api/score")
 async def score(file: UploadFile = File(...)):
-    raw = await file.read()
+    if file.filename and not file.filename.lower().endswith((".csv", ".txt")):
+        raise HTTPException(400, "upload a .csv file produced by CICFlowMeter")
+    raw = await file.read(MAX_UPLOAD_BYTES + 1)
+    if len(raw) > MAX_UPLOAD_BYTES:
+        raise HTTPException(413, f"file larger than {MAX_UPLOAD_BYTES // 2**20} MB")
+    if not raw.strip():
+        raise HTTPException(400, "the file is empty")
     try:
         df = pd.read_csv(io.BytesIO(raw), low_memory=False, encoding_errors="replace")
     except Exception as e:  # noqa: BLE001

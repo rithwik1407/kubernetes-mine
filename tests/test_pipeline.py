@@ -54,7 +54,7 @@ def test_run_scenario_auto_starts_capture_and_records_run(cfg, monkeypatch):
     monkeypatch.setattr(pipeline.cap, "read_state", lambda c=None: {"running": False})
     monkeypatch.setattr(pipeline.cap, "start", lambda w, p, c: started.append(1) or {"running": True})
     monkeypatch.setattr(pipeline, "launch", lambda *a, **k: {"job": "traffic-port-scan-x", "target": "svc:1880"})
-    run = pipeline.run_scenario("port_scan", cfg=cfg)
+    run = pipeline.run_scenario("port_scan", cfg=cfg, auto_stop=False)
     assert started and run["capture_started"] and run["expect_class"] == "PortScan"
     monkeypatch.setattr(pipeline, "list_jobs", lambda c=None: [{"name": "traffic-port-scan-x", "state": "running"}])
     st = pipeline.run_status(cfg=cfg)
@@ -66,7 +66,7 @@ def test_run_scenario_survives_unsupported_capture(cfg, monkeypatch):
     def nope(*a): raise cap.ServiceError("live capture needs Linux")
     monkeypatch.setattr(pipeline.cap, "start", nope)
     monkeypatch.setattr(pipeline, "launch", lambda *a, **k: {"job": "j1", "target": "t"})
-    run = pipeline.run_scenario("benign", cfg=cfg)
+    run = pipeline.run_scenario("benign", cfg=cfg, auto_stop=False)
     assert not run["capture_started"] and any("needs Linux" in n for n in run["notes"])
 
 
@@ -75,4 +75,4 @@ def test_launch_error_propagates(cfg, monkeypatch):
     def bad(*a, **k): raise trafficlab.TrafficLabError("traffic lab not deployed")
     monkeypatch.setattr(pipeline, "launch", bad)
     with pytest.raises(trafficlab.TrafficLabError):
-        pipeline.run_scenario("benign", cfg=cfg)
+        pipeline.run_scenario("benign", cfg=cfg, auto_stop=False)

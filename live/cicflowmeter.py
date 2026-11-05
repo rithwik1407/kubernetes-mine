@@ -5,7 +5,7 @@ is symlinked into its own staging directory and converted in isolation. Success
 is only reported after the output CSV exists and parses as a flow file.
 
 Usage:
-    python -m src.feature_extraction.cicflowmeter captures/pcap/<file>.pcap
+    python -m live.cicflowmeter captures/pcap/<file>.pcap
 """
 from __future__ import annotations
 
@@ -75,6 +75,35 @@ def java_command(cfg: dict[str, Any], in_dir: Path, out_dir: Path) -> list[str]:
     ]
 
 
+def support(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Can CICFlowMeter run here? Checks java, the jar, jnetpcap and its native libpcap link.
+    Never raises; `reason` says exactly what is missing and how to fix it."""
+    cfg = cfg or load_config()
+    c = cfg["cicflowmeter"]
+    java = shutil.which(c["java"]) or (c["java"] if Path(c["java"]).is_file() else None)
+    if not java:
+        return {"supported": False, "reason": f"java not found ({c['java']}); sudo apt install openjdk-17-jre-headless"}
+    try:
+        java_command(cfg, Path("/nonexistent-in"), Path("/nonexistent-out"))
+    except ConversionError as e:
+        return {"supported": False, "reason": f"{e}. Build it: see docs/live-system.md (CICFlowMeter)"}
+    lib = project_path(c["home"]) / c["jnetpcap_dir"] / "libjnetpcap.so"
+    if lib.is_file() and shutil.which("ldd"):
+        out = subprocess.run(["ldd", str(lib)], capture_output=True, text=True).stdout
+        missing = [ln.split("=>")[0].strip() for ln in out.splitlines() if "not found" in ln]
+        if missing:
+            return {"supported": False, "reason": f"jnetpcap cannot load {', '.join(missing)} "
+                    "(sudo apt install libpcap-dev provides libpcap.so)"}
+    return {"supported": True, "reason": None, "java": java, "jar": str(project_path(c["home"]) / c["jar"])}
+
+
+def _java_error(text: str) -> str:
+    """The first exception line of a Java stack trace plus its tail, not just the tail."""
+    lines = [ln for ln in text.splitlines() if ln.strip()]
+    first = next((ln for ln in lines if "Exception" in ln or "Error" in ln), lines[0] if lines else "")
+    return (first[:300] + (" ... " + lines[-1][:150] if lines and lines[-1] != first else "")).strip()
+
+
 def output_name(pcap: Path) -> str:
     return f"{pcap.stem}.pcap_Flow.csv"
 
@@ -117,7 +146,7 @@ def convert_pcap(pcap: str | Path, out_dir: Path | None = None, cfg: dict[str, A
             return fail(f"cannot run java: {e}")
         produced = list(stage_out.glob("*.csv"))
         if proc.returncode != 0:
-            return fail(f"CICFlowMeter exited with {proc.returncode}: {proc.stderr[-500:]}")
+            return fail(f"CICFlowMeter exited with {proc.returncode}: {_java_error(proc.stderr or proc.stdout)}")
         if not produced:
             # CICFlowMeter writes no CSV when a capture yields no flows.
             if "TOTAL FLOWS GENERATED: 0" in proc.stdout + proc.stderr:
