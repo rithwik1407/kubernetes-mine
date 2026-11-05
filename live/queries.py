@@ -61,7 +61,7 @@ def metrics(cfg=None) -> dict[str, Any]:
             "malicious_flows": one("SELECT COUNT(*) FROM detections WHERE simulated = 0 AND is_malicious = 1"),
             "flows_by_source": dict(c.execute("SELECT source, COUNT(*) FROM detections WHERE simulated = 0 GROUP BY 1").fetchall()),
             "flows_by_class": dict(c.execute("SELECT predicted_class, COUNT(*) FROM detections WHERE simulated = 0 GROUP BY 1").fetchall()),
-            "flow_bursts": one("SELECT COUNT(*) FROM behavior_alerts"),
+            "flow_bursts": one("SELECT COUNT(*) FROM behavior_alerts WHERE dismissed_at IS NULL"),
             "active_threats": one(
                 "SELECT COUNT(DISTINCT src_ip) FROM (SELECT src_ip FROM detections WHERE simulated = 0 AND is_malicious = 1 "
                 "AND source IN ('pcap','live') AND confidence >= ? AND detected_at >= ? "
@@ -116,7 +116,7 @@ def recent_events(limit=50, cfg=None) -> list[dict[str, Any]]:
             "SELECT created_at ts, 'deception' kind, action || ' ' || COALESCE(decoy_name, '') title, src_ip, NULL dst_ip, "
             "NULL dst_port, evidence_count n, max_confidence confidence, result capture_file, trigger, action, "
             "attack_class, reason, evidence FROM decisions "
-            "WHERE action IN ('deploy','scale','remove','engage','redirect','release','suppress_limit','suppress_cooldown') "
+            "WHERE action IN ('deploy','scale','remove','engage','redirect','release','decoy_ready','deploy_failed','suppress_limit','suppress_cooldown') "
             "ORDER BY id DESC LIMIT ?"), (int(limit),)))
     for d in dec:
         try:
@@ -195,7 +195,89 @@ def activity(minutes: int = 15, bucket_s: int = 30, cfg=None) -> dict[str, Any]:
 
 
 def behavior_alerts(limit=200, cfg=None) -> list[dict[str, Any]]:
-    return _q("SELECT * FROM behavior_alerts ORDER BY id DESC LIMIT ?", (int(limit),), cfg)
+    """Open behaviour alerts (dismissed ones stay in the database and in the event feed)."""
+    return _q("SELECT * FROM behavior_alerts WHERE dismissed_at IS NULL ORDER BY id DESC LIMIT ?", (int(limit),), cfg)
+
+
+def behavior_alert_count(cfg=None) -> int:
+    with db.connect(db.db_path(cfg)) as c:
+        return c.execute("SELECT COUNT(*) FROM behavior_alerts WHERE dismissed_at IS NULL").fetchone()[0]
+
+
+def dismiss_behavior_alert(alert_id: int, cfg=None) -> dict[str, Any] | None:
+    """Soft delete: the alert leaves the Behaviour alerts table but keeps its row, so the
+    security-event history, deception decisions and run breakdowns that cite it are intact."""
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        row = c.execute("SELECT id, dismissed_at FROM behavior_alerts WHERE id = ?", (int(alert_id),)).fetchone()
+        if row is None:
+            return None
+        if row["dismissed_at"] is None:
+            c.execute("UPDATE behavior_alerts SET dismissed_at = ? WHERE id = ?", (now, int(alert_id)))
+        remaining = c.execute("SELECT COUNT(*) FROM behavior_alerts WHERE dismissed_at IS NULL").fetchone()[0]
+    return {"id": int(alert_id), "dismissed_at": row["dismissed_at"] or now, "remaining": remaining}
+
+
+def sessions(limit=50, cfg=None) -> list[dict[str, Any]]:
+    """Capture sessions, newest first, with their flow counts."""
+    with db.connect(db.db_path(cfg)) as c:
+        rows = [dict(r) for r in c.execute("SELECT * FROM capture_sessions ORDER BY id DESC LIMIT ?", (int(limit),))]
+        counts = dict(c.execute("SELECT session_id, COUNT(*) FROM detections WHERE session_id IS NOT NULL "
+                                "GROUP BY 1").fetchall())
+    for r in rows:
+        for k in ("scenarios", "jobs", "run_ids"):
+            r[k] = json.loads(r[k] or "[]")
+        r["flows"] = counts.get(r["id"], 0)
+    return rows
+
+
+def flows_page(session="current", page=1, page_size=20, predicted_class=None, malicious=None, src_ip=None,
+               lab_scenario=None, cfg=None) -> dict[str, Any]:
+    """Live traffic, one page at a time, for one capture session (default: the newest)."""
+    with db.connect(db.db_path(cfg)) as c:
+        if session == "current":
+            sid = c.execute("SELECT MAX(id) FROM capture_sessions").fetchone()[0]
+        elif session == "all":
+            sid = None
+        else:
+            sid = int(session)
+            if c.execute("SELECT 1 FROM capture_sessions WHERE id = ?", (sid,)).fetchone() is None:
+                raise LookupError(f"capture session {sid} does not exist")
+        where, params = ["simulated = 0"], []
+        if session != "all":
+            # "current" with no session yet -> nothing (never fall back to old flows)
+            where.append("session_id = ?")
+            params.append(sid if sid is not None else -1)
+        if predicted_class:
+            where.append("predicted_class = ?")
+            params.append(predicted_class)
+        if malicious is not None:
+            where.append("is_malicious = ?")
+            params.append(int(malicious))
+        if src_ip:
+            where.append("src_ip = ?")
+            params.append(src_ip)
+        if lab_scenario == "any":
+            where.append("lab_scenario IS NOT NULL")
+        elif lab_scenario == "UNKNOWN":
+            where.append("lab_scenario IS NULL")
+        elif lab_scenario:
+            where.append("lab_scenario = ?")
+            params.append(lab_scenario)
+        w = " AND ".join(where)
+        total = c.execute(f"SELECT COUNT(*) FROM detections WHERE {w}", params).fetchone()[0]
+        pages = max(1, -(-total // page_size))
+        page = min(max(1, int(page)), pages)
+        rows = _records(db.query_df(c, f"SELECT * FROM detections WHERE {w} ORDER BY id DESC LIMIT ? OFFSET ?",
+                                    (*params, int(page_size), (page - 1) * int(page_size))))
+        sess = dict(c.execute("SELECT * FROM capture_sessions WHERE id = ?", (sid,)).fetchone() or {}) if sid else None
+    if sess:
+        for k in ("scenarios", "jobs", "run_ids"):
+            sess[k] = json.loads(sess[k] or "[]")
+    for r in rows:
+        r["scenario"] = r.get("lab_scenario") or ("control-plane" if r.get("allowlisted") else "UNKNOWN")
+    return {"session_id": sid, "session": sess, "total": total, "page": page, "pages": pages,
+            "page_size": int(page_size), "rows": rows}
 
 
 def captures(limit=100, cfg=None) -> list[dict[str, Any]]:

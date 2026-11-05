@@ -152,6 +152,39 @@ def live_bursts(limit: int = Query(200, ge=1, le=5000)):
     return queries.behavior_alerts(limit, CFG)
 
 
+@router.get("/api/live/bursts/count")
+def live_bursts_count():
+    return {"open": queries.behavior_alert_count(CFG)}
+
+
+@router.delete("/api/live/bursts/{alert_id}")
+def live_burst_dismiss(alert_id: int):
+    """Remove one alert from the Behaviour alerts table (soft delete; history is kept)."""
+    res = queries.dismiss_behavior_alert(alert_id, CFG)
+    if res is None:
+        raise HTTPException(404, f"behaviour alert {alert_id} not found")
+    log.info("behaviour alert %s dismissed (%s still open)", alert_id, res["remaining"])
+    return res
+
+
+@router.get("/api/live/sessions")
+def live_sessions(limit: int = Query(50, ge=1, le=500)):
+    return queries.sessions(limit, CFG)
+
+
+@router.get("/api/live/flows")
+def live_flows(session: str = Query("current", pattern=r"^(current|all|[0-9]{1,9})$"),
+               page: int = Query(1, ge=1, le=1_000_000), page_size: int = Query(20, ge=5, le=200),
+               predicted_class: str | None = Query(None, max_length=64),
+               malicious: bool | None = None, src_ip: str | None = Query(None, max_length=64),
+               lab_scenario: str | None = Query(None, max_length=64, pattern=r"^([a-z_]+|UNKNOWN)$")):
+    """Live traffic for one capture session (default: the newest), paginated on the server."""
+    try:
+        return queries.flows_page(session, page, page_size, predicted_class, malicious, src_ip, lab_scenario, CFG)
+    except LookupError as e:
+        raise HTTPException(404, str(e))
+
+
 @router.get("/api/live/captures")
 def live_captures(limit: int = Query(100, ge=1, le=2000)):
     return queries.captures(limit, CFG)

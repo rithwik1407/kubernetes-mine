@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS detections (
     capture_file TEXT, source TEXT NOT NULL, processing_time_ms REAL, detected_at TEXT NOT NULL,
     true_label TEXT, model TEXT, simulated INTEGER NOT NULL DEFAULT 0,
     flow_duration_us REAL, packets INTEGER, bytes INTEGER, allowlisted TEXT,
-    lab_scenario TEXT, lab_job TEXT
+    lab_scenario TEXT, lab_job TEXT, session_id INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_det_detected_at ON detections(detected_at);
 CREATE INDEX IF NOT EXISTS idx_det_malicious   ON detections(is_malicious);
@@ -97,13 +97,19 @@ CREATE TABLE IF NOT EXISTS engagements (
 CREATE INDEX IF NOT EXISTS idx_eng_src ON engagements(src_ip, state);
 
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
+-- One row per capture start. Windows (captures) and their flows (detections) carry the
+-- session id, so a new capture never shows flows of an earlier one.
+CREATE TABLE IF NOT EXISTS capture_sessions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT, started_at TEXT NOT NULL, stopped_at TEXT,
+    interface TEXT, pid INTEGER, scenarios TEXT, jobs TEXT, run_ids TEXT, note TEXT
+);
 """
 
 DETECTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
     "predicted_class", "confidence", "is_malicious", "capture_file", "source",
     "processing_time_ms", "detected_at", "true_label", "model",
-    "flow_duration_us", "packets", "bytes", "allowlisted", "lab_scenario", "lab_job",
+    "flow_duration_us", "packets", "bytes", "allowlisted", "lab_scenario", "lab_job", "session_id",
 ]
 
 
@@ -128,9 +134,11 @@ def connect(path: str | Path | None = None) -> Iterator[sqlite3.Connection]:
         conn.close()
 
 
-_MIGRATIONS = {"captures": {"window_s": "REAL"}, "behavior_alerts": {"distinct_ports": "INTEGER"},
+_MIGRATIONS = {"captures": {"window_s": "REAL", "session_id": "INTEGER"},
+               "behavior_alerts": {"distinct_ports": "INTEGER", "session_id": "INTEGER", "dismissed_at": "TEXT"},
                "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER",
-                              "allowlisted": "TEXT", "lab_scenario": "TEXT", "lab_job": "TEXT"}}
+                              "allowlisted": "TEXT", "lab_scenario": "TEXT", "lab_job": "TEXT",
+                              "session_id": "INTEGER"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -140,6 +148,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         for col, typ in cols.items():
             if col not in have:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_det_session ON detections(session_id)")
 
 
 def _clean(v):

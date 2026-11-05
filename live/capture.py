@@ -188,9 +188,13 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
         thread.start()
 
     window = adaptive.initial_window(wcfg)
+    started = _now()
+    with db.connect(db.db_path(cfg)) as conn:   # every capture start is a new session
+        session_id = db.insert_row(conn, "capture_sessions", started_at=started, pid=os.getpid(),
+                                   interface=cfg["capture"]["interface"], scenarios="[]", jobs="[]", run_ids="[]")
     base = {"status": "running", "pid": os.getpid(), "interface": cfg["capture"]["interface"],
-            "started_at": _now(), "processing": process, "window_limit": windows,
-            "window_sizes": adaptive.window_sizes(wcfg)}
+            "started_at": started, "processing": process, "window_limit": windows,
+            "window_sizes": adaptive.window_sizes(wcfg), "session_id": session_id}
     final: dict[str, Any] = {"status": "stopped"}
     with db.connect(db.db_path(cfg)) as conn:
         db.insert_row(conn, "window_transitions", created_at=_now(), previous_s=None, next_s=window, rule="start",
@@ -213,7 +217,8 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
             next_window = decision.next_s
             fields = {"interface": res.interface, "started_at": res.started_at, "ended_at": res.ended_at,
                       "duration_s": res.duration_s, "packets": res.packets, "bytes": res.bytes,
-                      "window_s": window, "next_window_s": next_window, "status": "captured"}
+                      "window_s": window, "next_window_s": next_window, "status": "captured",
+                      "session_id": session_id}
             with db.connect(db.db_path(cfg)) as conn:
                 db.upsert_capture(conn, Path(res.pcap).name, **fields)
                 db.insert_row(conn, "window_transitions", created_at=_now(), pcap_file=Path(res.pcap).name,
@@ -233,8 +238,11 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
         if thread:
             work.put(None)
             thread.join()
+        stopped = _now()
+        with db.connect(db.db_path(cfg)) as conn:
+            conn.execute("UPDATE capture_sessions SET stopped_at = ? WHERE id = ?", (stopped, session_id))
         with lock:
-            write_state(cfg, **{**base, **final}, stopped_at=_now(), **stats)
+            write_state(cfg, **{**base, **final}, stopped_at=stopped, **stats)
         pid_file.unlink(missing_ok=True)
         if fcntl:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)

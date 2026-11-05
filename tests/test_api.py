@@ -153,3 +153,53 @@ def test_detection_policy_roundtrip(client):
     assert r.json()["hysteresis"]["quiet_seconds"] == 90
     r = client.put("/api/deception/detection-policy", json={"reset": True})
     assert r.status_code == 200 and not r.json()["overridden"]
+
+
+def _db_path(client):
+    from live.config import load_config
+    return load_config()["paths"]["database"]
+
+
+def test_flows_are_isolated_per_capture_session_and_paginated(client):
+    from live import db
+    with db.connect(_db_path(client)) as c:
+        old = db.insert_row(c, "capture_sessions", started_at="2026-11-05T10:00:00+00:00", scenarios='["slow_dos"]')
+        new = db.insert_row(c, "capture_sessions", started_at="2026-11-05T11:00:00+00:00", scenarios='["port_scan"]')
+        for sid, scen, n in ((old, "slow_dos", 7), (new, "port_scan", 23)):
+            for i in range(n):
+                db.insert_row(c, "detections", predicted_class="BENIGN", confidence=0.9, is_malicious=0, source="pcap",
+                              detected_at="2026-11-05T11:00:01+00:00", src_ip="10.42.0.9", dst_ip="10.42.0.78",
+                              dst_port=i, protocol=6, session_id=sid, lab_scenario=scen)
+        db.insert_row(c, "detections", predicted_class="BENIGN", confidence=0.9, is_malicious=0, source="pcap",
+                      detected_at="2026-11-05T11:00:02+00:00", src_ip="10.42.0.1", dst_ip="10.42.0.78",
+                      protocol=6, session_id=new)
+    r = client.get("/api/live/flows?page_size=10").json()          # default: the newest session only
+    assert r["session_id"] == new and r["total"] == 24 and r["pages"] == 3 and len(r["rows"]) == 10
+    assert {x["session_id"] for x in r["rows"]} == {new}
+    assert client.get("/api/live/flows?page=3&page_size=10").json()["rows"].__len__() == 4
+    assert client.get("/api/live/flows?page=99&page_size=10").json()["page"] == 3        # clamped
+    r = client.get("/api/live/flows?lab_scenario=UNKNOWN").json()
+    assert r["total"] == 1 and r["rows"][0]["scenario"] == "UNKNOWN"
+    assert client.get(f"/api/live/flows?session={old}").json()["total"] == 7
+    assert client.get("/api/live/flows?session=all").json()["total"] >= 31
+    assert client.get("/api/live/flows?session=999999").status_code == 404
+    assert client.get("/api/live/flows?session=x;1").status_code == 422
+    s = client.get("/api/live/sessions").json()
+    assert s[0]["id"] == new and s[0]["scenarios"] == ["port_scan"] and s[0]["flows"] == 24
+
+
+def test_behaviour_alert_delete_is_a_soft_delete(client):
+    from live import db
+    with db.connect(_db_path(client)) as c:
+        a = db.insert_row(c, "behavior_alerts", src_ip="10.42.0.9", dst_ip="10.42.0.78", dst_port=1880, protocol=6,
+                          flows=40, rate_per_s=4.0, window_s=10.0, ml_malicious_flows=0, ml_classes="{}",
+                          detected_at="2026-11-05T11:00:00+00:00")
+    before = client.get("/api/live/bursts/count").json()["open"]
+    r = client.delete(f"/api/live/bursts/{a}")
+    assert r.status_code == 200 and r.json()["remaining"] == before - 1
+    assert all(x["id"] != a for x in client.get("/api/live/bursts").json())
+    assert client.delete("/api/live/bursts/987654").status_code == 404
+    with db.connect(_db_path(client)) as c:      # row kept: history intact
+        assert c.execute("SELECT dismissed_at FROM behavior_alerts WHERE id = ?", (a,)).fetchone()[0]
+    assert any(e.get("kind") == "burst" or "burst" in str(e.get("title", "")).lower() or e.get("src_ip") == "10.42.0.9"
+               for e in client.get("/api/live/events").json())

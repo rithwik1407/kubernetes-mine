@@ -138,11 +138,30 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
            "target": ", ".join(dict.fromkeys(j["target_label"] or j["target"] for j in jobs)),
            "job": first["job"], "expect_class": first["expect_class"] if len(jobs) == 1 else "per job",
            "capture_started": capture_started, "capture_running": bool(capture_state.get("running")),
-           "notes": notes, "auto_stop": {"enabled": bool(auto_stop), "state": "waiting for Jobs" if auto_stop else "off"}}
+           "notes": notes, "auto_stop": {"enabled": bool(auto_stop), "state": "waiting for Jobs" if auto_stop else "off"},
+           "session_id": capture_state.get("session_id") if capture_state.get("running") else None}
+    if run["session_id"]:
+        _tag_session(run["session_id"], run, cfg)
     _save_run(run, cfg)
     if auto_stop:
         start_watcher(run_id, cfg)
     return run
+
+
+def _tag_session(session_id: int, run: dict[str, Any], cfg: dict[str, Any]) -> None:
+    """Record which scenarios and Jobs ran during a capture session (shown in its selector)."""
+    with db.connect(db.db_path(cfg)) as conn:
+        row = conn.execute("SELECT scenarios, jobs, run_ids FROM capture_sessions WHERE id = ?", (session_id,)).fetchone()
+        if row is None:
+            return
+        sc = json.loads(row["scenarios"] or "[]")
+        jb = json.loads(row["jobs"] or "[]")
+        rid = json.loads(row["run_ids"] or "[]")
+        sc += [j["scenario"] for j in run["jobs"] if j["scenario"] not in sc]
+        jb += [j["job"] for j in run["jobs"]]
+        rid.append(run["id"])
+        conn.execute("UPDATE capture_sessions SET scenarios = ?, jobs = ?, run_ids = ? WHERE id = ?",
+                     (json.dumps(sc), json.dumps(jb), json.dumps(rid), session_id))
 
 
 def run_scenario(scenario: str, target: str | None = None, count: int | None = None, delay: float | None = None,
@@ -270,6 +289,28 @@ def _breakdown(conn, job: dict[str, Any], since: str, until: str | None) -> dict
             "behaviour_alerts": {a: n for a, n in alerts}}
 
 
+def _outcome(pj: dict[str, Any]) -> dict[str, Any]:
+    """A Job counts as successful only when it ran, its generator got answers from the
+    target AND the capture scored flows of its pod. Creating the Job proves nothing."""
+    v = pj.get("verification") or {}
+    flows = (pj.get("breakdown") or {}).get("flows") or 0
+    base = {"started_at": v.get("first_ts"), "ended_at": v.get("last_ts") if v.get("finished") else None,
+            "answered": v.get("ok", 0), "failed": v.get("errors", 0), "captured_flows": flows}
+    st = pj.get("state")
+    if pj.get("failure") and st == "failed":
+        return {**base, "result": "failed", "detail": pj["failure"].get("summary")}
+    if st in ("pending", "running") and not flows:
+        return {**base, "result": st, "detail": "generator running" if st == "running" else "pod not started yet"}
+    if not v.get("ok"):
+        return {**base, "result": "no traffic", "detail": "the generator got no answer from the target"
+                + (f" ({', '.join(f'{k} x{n}' for k, n in (v.get('error_types') or {}).items())})" if v.get("error_types") else "")}
+    if not flows:
+        return {**base, "result": "not captured",
+                "detail": "traffic reached the target but no flow of this pod was scored (capture off, or still processing)"}
+    return {**base, "result": "verified" if st == "succeeded" else st,
+            "detail": f"{v.get('ok', 0):,} answered by the target, {flows:,} flows captured and scored"}
+
+
 def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     with db.connect(db.db_path(cfg)) as conn:
@@ -313,6 +354,7 @@ def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> 
             until = (datetime.fromisoformat(run["finished_at"]) + timedelta(seconds=60)).isoformat()
         for pj in per_job:
             pj["breakdown"] = _breakdown(conn, pj, t0, until)
+            pj["outcome"] = _outcome(pj)
     scored = [c for c in caps if c["status"] in cap.DONE_STATUSES]
     failed = [c for c in caps if c["status"] == "failed"]
     flows = sum(d["n"] for d in det)

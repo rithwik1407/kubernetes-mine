@@ -249,15 +249,17 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       <div class="grid kpis" id="capKpis"></div>
     </div>
     <div class="card" style="margin-top:14px">
-      <div class="card-head"><div><h2>Flows</h2><p class="hint">Newest first, refreshed every 5 s while this page is open</p></div></div>
+      <div class="card-head"><div><h2>Flows</h2><p class="hint" id="flHint">Newest first, refreshed every 5 s while this page is open</p></div></div>
       <div class="filters">
+        <label class="filter">Capture session <select id="flSession"><option value="current">current session</option><option value="all">all sessions</option></select></label>
         <label class="filter">Class <select id="flClass"><option value="">all</option></select></label>
         <label class="filter">Status <select id="flMal"><option value="">all</option><option value="true">malicious</option><option value="false">benign</option></select></label>
-        <label class="filter">Scenario <select id="flLab"><option value="">all flows</option><option value="any">any lab scenario</option></select></label>
+        <label class="filter">Scenario <select id="flLab"><option value="">all flows</option><option value="any">any lab scenario</option><option value="UNKNOWN">UNKNOWN (not from a lab pod)</option></select></label>
         <label class="filter">Source IP <input id="flSrc" placeholder="10.42.0.12" size="14" maxlength="64"></label>
-        <label class="filter">Rows <select id="flLimit"><option>100</option><option selected>200</option><option>500</option></select></label>
+        <label class="filter">Rows per page <select id="flLimit"><option>10</option><option selected>20</option><option>50</option><option>100</option></select></label>
       </div>
       <div id="flowsTable"><div class="loading">Loading flows…</div></div>
+      <div class="filters" id="flPager" style="margin:10px 0 0;justify-content:space-between"></div>
     </div>
   </section>
 
@@ -275,7 +277,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       </div>
       <div id="thTable"><div class="loading">Loading…</div></div>
     </div>
-    <div class="card" style="margin-top:14px"><h2>Behaviour alerts (flow bursts and port sweeps)</h2><p class="hint">Rule-based detection of reconnaissance that looks benign flow by flow</p><div id="thBursts"></div></div>
+    <div class="card" style="margin-top:14px"><h2>Behaviour alerts (flow bursts and port sweeps)</h2><p class="hint">Rule-based detection of reconnaissance that looks benign flow by flow<span id="thBurstCount"></span></p><div id="thBursts"></div></div>
   </section>
 
   <!-- D. WINDOW -->
@@ -606,11 +608,19 @@ function setBadge(n) { const b = $("threatBadge"); b.hidden = !n; b.textContent 
 async function pageTraffic() {
   const cls = $("flClass").value, mal = $("flMal").value, src = $("flSrc").value.trim(), lim = $("flLimit").value;
   if (src && !/^[0-9a-fA-F:.]{2,64}$/.test(src)) { $("flowsTable").innerHTML = errBox("Source IP: use an IPv4/IPv6 address"); return; }
-  const lab = $("flLab").value;
-  const q = new URLSearchParams({ limit: lim }); if (cls) q.set("predicted_class", cls); if (mal) q.set("malicious", mal); if (src) q.set("src_ip", src); if (lab) q.set("lab_scenario", lab);
-  if ($("flLab").options.length === 2) api("/api/trafficlab/scenarios").then(sc => $("flLab").insertAdjacentHTML("beforeend",
+  const lab = $("flLab").value, sess = $("flSession").value;
+  const q = new URLSearchParams({ session: sess, page: S.flPage || 1, page_size: lim }); if (cls) q.set("predicted_class", cls); if (mal) q.set("malicious", mal); if (src) q.set("src_ip", src); if (lab) q.set("lab_scenario", lab);
+  if ($("flLab").options.length === 3) api("/api/trafficlab/scenarios").then(sc => $("flLab").insertAdjacentHTML("beforeend",
     Object.keys(sc.scenarios).map(k => `<option value="${esc(k)}">${esc(k)}</option>`).join(""))).catch(() => { });
-  const [cs, rows] = await Promise.all([api("/api/live/capture/status"), api("/api/live/detections?" + q)]);
+  const [cs, pg, sessions] = await Promise.all([api("/api/live/capture/status"), api("/api/live/flows?" + q), api("/api/live/sessions?limit=50")]);
+  const rows = pg.rows; S.flPage = pg.page;
+  const ssel = $("flSession"), keep = ssel.value, sig = JSON.stringify(sessions.map(x => [x.id, x.scenarios, x.stopped_at]));
+  if (S.flSessSig !== sig) { S.flSessSig = sig; ssel.innerHTML = `<option value="current">current session${sessions[0] ? " (#" + sessions[0].id + ")" : ""}</option>` +
+    sessions.map(x => `<option value="${x.id}">#${x.id} · ${time(x.started_at)}${x.scenarios.length ? " · " + esc(x.scenarios.join(", ")) : ""} · ${fmt(x.flows)} flows</option>`).join("") + `<option value="all">all sessions</option>`;
+  ssel.value = [...ssel.options].some(o => o.value === keep) ? keep : "current"; }
+  const ps = pg.session;
+  $("flHint").innerHTML = ps ? `Session #${ps.id}, started ${time(ps.started_at)}${ps.stopped_at ? ", stopped " + time(ps.stopped_at) : " (capturing)"}${ps.scenarios.length ? " · scenarios: " + esc(ps.scenarios.join(", ")) : ""} · newest first, refreshed every 5 s`
+    : (sess === "all" ? "All capture sessions · newest first" : "No capture session yet: start capture to begin a new session");
   const sv = cs.service, last = (cs.recent || [])[0];
   $("capHint").innerHTML = !cs.support.supported ? `<span style="color:var(--warning-ink)">Capture unavailable: ${esc(cs.support.reason)}</span>`
     : !cs.cicflowmeter.supported ? `<span style="color:var(--warning-ink)">Capture works but CICFlowMeter is unavailable: ${esc(cs.cicflowmeter.reason)}</span>`
@@ -625,14 +635,19 @@ async function pageTraffic() {
     kpi("Flows in last window", last ? fmt(last.flows) : NA, last && last.error ? `<span style="color:var(--critical-ink)">${esc(last.error.slice(0, 90))}</span>` : (failed ? `${failed} of last 20 windows failed` : "")),
   ].join("");
   $("flowsTable").innerHTML = table([
-    { h: "Time", f: r => time(r.detected_at) }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}:${esc(r.src_port)}</span>` },
+    { h: "Time", f: r => time(r.detected_at) }, { h: "Flow ID", f: r => `<span class="mono" title="${esc(r.flow_id || "")} · session #${esc(r.session_id ?? "—")}">${esc(r.id)}</span>` }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}:${esc(r.src_port)}</span>` },
     { h: "Destination", f: r => `<span class="mono">${esc(r.dst_ip)}:${esc(r.dst_port)}</span>` },
     { h: "Proto", f: r => ({ 6: "TCP", 17: "UDP", 1: "ICMP" }[r.protocol] || esc(r.protocol)) },
     { h: "Duration", num: 1, f: r => r.flow_duration_us === null || r.flow_duration_us === undefined ? "—" : fmt(r.flow_duration_us / 1000, 1) + " ms" },
     { h: "Packets", num: 1, f: r => fmt(r.packets) }, { h: "Class", f: r => clsTag(r.predicted_class) },
     { h: "Confidence", num: 1, f: r => fmt(r.confidence, 3) },
-    { h: "Scenario", f: r => r.lab_scenario ? `<span title="${esc(r.lab_job || "")}">${esc(r.lab_scenario)}</span>` : "—" }, { h: "Window", f: r => `<span class="mono" title="${esc(r.capture_file)}">${esc((r.capture_file || "").slice(-28))}</span>` },
-  ], rows, { rowClass: r => r.is_malicious ? "mal" : "", emptyTitle: "No flows scored yet", emptyBody: "Start capture and generate traffic in the Traffic lab." });
+    { h: "Scenario", f: r => r.lab_scenario ? `<span title="${esc(r.lab_job || "")}">${esc(r.lab_scenario)}</span>` : `<span style="color:var(--muted)" title="${r.allowlisted ? esc(r.allowlisted) : "neither end is a Traffic-lab pod"}">${esc(r.scenario)}</span>` }, { h: "Window", f: r => `<span class="mono" title="${esc(r.capture_file)}">${esc((r.capture_file || "").slice(-28))}</span>` },
+  ], rows, { rowClass: r => r.is_malicious ? "mal" : "", emptyTitle: pg.total ? "No flows on this page" : "No flows in this session yet", emptyBody: "Start capture and generate traffic in the Traffic lab." });
+  const P = pg.page, N = pg.pages, nums = [...new Set([1, P - 2, P - 1, P, P + 1, P + 2, N])].filter(n => n >= 1 && n <= N).sort((a, b) => a - b);
+  let prev = 0, links = "";
+  for (const n of nums) { if (n - prev > 1) links += `<span style="color:var(--muted)">…</span>`; links += `<button class="btn small${n === P ? " primary" : ""}" data-pg="${n}" ${n === P ? 'aria-current="page"' : ""}>${n}</button>`; prev = n; }
+  $("flPager").innerHTML = `<span class="hint" style="margin:0">${fmt(pg.total)} flows · page ${fmt(P)} of ${fmt(N)}</span>` +
+    `<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><button class="btn small" data-pg="${P - 1}" ${P <= 1 ? "disabled" : ""}>Previous</button>${links}<button class="btn small" data-pg="${P + 1}" ${P >= N ? "disabled" : ""}>Next</button></span>`;
 }
 
 /* ---------------- C. Threats ---------------- */
@@ -645,7 +660,8 @@ async function pageThreats(full) {
   ], md.reliability, { maxH: "320px" }) + `<p class="hint" style="margin-top:8px">${esc(md.reliability_rule)}. Not in this model: Infiltration and Heartbleed (too few samples, dropped in training). Model: ${esc(md.best_model)} (${esc(md.name)}), macro F1 ${fmt(best.macro_f1, 4)}.</p>`;
   const sel = $("thClass"); if (sel.options.length === 1) md.classes.filter(c => c !== "BENIGN").forEach(c => sel.add(new Option(c, c)));
   const q = new URLSearchParams({ limit: 300, malicious: true }); if (sel.value) q.set("predicted_class", sel.value);
-  const [rows, bursts] = await Promise.all([api("/api/live/detections?" + q), api("/api/live/bursts?limit=100")]);
+  const [rows, bursts, bcount] = await Promise.all([api("/api/live/detections?" + q), api("/api/live/bursts?limit=100"), api("/api/live/bursts/count")]);
+  $("thBurstCount").textContent = ` · ${fmt(bcount.open)} open alert${bcount.open === 1 ? "" : "s"}` + (bcount.open > bursts.length ? ` (newest ${bursts.length} shown)` : "");
   const minc = +$("thConf").value;
   $("thTable").innerHTML = table([
     { h: "Detected", f: r => `${time(r.detected_at)} <span style="color:var(--muted)">${ago(r.detected_at)}</span>` }, { h: "Class", f: r => clsTag(r.predicted_class) },
@@ -660,6 +676,7 @@ async function pageThreats(full) {
     { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>` }, { h: "Target", f: r => `<span class="mono">${esc(r.dst_ip)}${r.dst_port ? ":" + esc(r.dst_port) : ""}</span>` },
     { h: "Flows", num: 1, f: r => fmt(r.flows) }, { h: "Ports", num: 1, f: r => fmt(r.distinct_ports) }, { h: "Rate /s", num: 1, f: r => fmt(r.rate_per_s, 2) },
     { h: "Window", num: 1, f: r => fmt(r.window_s, 1) + " s" }, { h: "ML malicious in burst", num: 1, f: r => fmt(r.ml_malicious_flows) },
+    { h: "Actions", f: r => `<button class="btn small danger" data-del-alert="${esc(r.id)}" aria-label="Delete alert ${esc(r.id)}" title="Delete this alert">Delete</button>` },
   ], bursts, { emptyTitle: "No behaviour alerts", emptyBody: "Scans and recon bursts appear here." });
 }
 async function runEval(btn) {
@@ -756,7 +773,9 @@ async function pageLab(full) {
       ((run.run.launch_errors || []).map(e => errBox(`${e.scenario} → ${e.target || "default"} not launched: ${e.error}`)).join("")) +
       (run.jobs && run.jobs.length ? `<h3 style="font-size:13px;margin:8px 0 6px">Expected vs predicted, per Job</h3>` + table([
         { h: "Job", f: j => `<span class="mono">${esc(j.job)}</span>` }, { h: "Attack → target", f: j => `${esc(j.scenario)} → ${esc(j.target_label || j.target)}` },
-        { h: "State", f: j => pill(j.state, j.state) }, { h: "Expected", f: j => j.expect_class ? clsTag(j.expect_class) : "—" },
+        { h: "State", f: j => pill(j.state, j.state) },
+        { h: "Result", wrap: 1, f: j => j.outcome ? pill(j.outcome.result, j.outcome.result === "verified" ? "ok" : ["failed", "no traffic", "not captured"].includes(j.outcome.result) ? "error" : "idle") + `<div class="hint" style="margin:2px 0 0;white-space:normal;max-width:300px">${esc(j.outcome.detail || "")}${j.outcome.started_at ? ` · ${time(j.outcome.started_at)}–${j.outcome.ended_at ? time(j.outcome.ended_at) : "…"}` : ""}</div>` : "—" },
+        { h: "Expected", f: j => j.expect_class ? clsTag(j.expect_class) : "—" },
         { h: "Flows", num: 1, f: j => fmt(j.breakdown.flows) },
         { h: "Predicted", wrap: 1, f: j => Object.entries(j.breakdown.by_class || {}).sort((a, b) => b[1] - a[1]).map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" ") || `<span class="hint">${esc(j.breakdown.note || "no flows yet")}</span>` },
         { h: "Detected as expected", num: 1, f: j => j.breakdown.accuracy == null ? "—" : pct(j.breakdown.accuracy, 1) },
@@ -992,8 +1011,14 @@ document.querySelectorAll("nav button").forEach(b => b.addEventListener("click",
 $("menuBtn").onclick = () => $("side").classList.toggle("open");
 $("refreshBtn").onclick = () => { loadChrome(); refresh(true); };
 $("pauseBtn").onclick = () => { S.paused = !S.paused; $("pauseBtn").textContent = S.paused ? "Resume" : "Pause"; $("pauseBtn").setAttribute("aria-pressed", S.paused); $("updPill").textContent = S.paused ? "auto-refresh paused" : $("updPill").textContent; };
-["flClass", "flMal", "flLimit", "flLab"].forEach(i => $(i).addEventListener("change", () => refresh(true)));
-$("flSrc").addEventListener("change", () => refresh(true));
+["flClass", "flMal", "flLimit", "flLab", "flSession"].forEach(i => $(i).addEventListener("change", () => { S.flPage = 1; refresh(true); }));
+$("thBursts").addEventListener("click", async e => {
+  const b = e.target.closest("[data-del-alert]"); if (!b) return;
+  if (!await confirmDlg("Delete this behaviour alert?", "It is removed from this table only. Security events, detections and deception decisions that cite it are kept.")) return;
+  act(b, () => api("/api/live/bursts/" + encodeURIComponent(b.dataset.delAlert), { method: "DELETE" }), r => `Alert deleted · ${r.remaining} open`);
+});
+$("flPager").addEventListener("click", e => { const b = e.target.closest("[data-pg]"); if (!b || b.disabled) return; S.flPage = +b.dataset.pg; refresh(true); });
+$("flSrc").addEventListener("change", () => { S.flPage = 1; refresh(true); });
 ["thClass", "thConf"].forEach(i => $(i).addEventListener("change", () => refresh(true)));
 $("winChanged").addEventListener("change", () => refresh(true));
 ["logLevel", "logComp"].forEach(i => $(i).addEventListener("change", () => refresh(true)));

@@ -311,6 +311,7 @@ class MapeKController:
                         # The source is redirected only once one of its decoys is Ready
                         # (_apply_redirects); until then its traffic still reaches the real service.
                         rd = {"applied": False, "pending": True, "reason": "waiting for a Ready decoy"}
+                        scen = self.scenario_of(src)
                         eid = db.insert_row(c, "engagements", src_ip=src, attack_class=a["attack_class"],
                                             trigger=a["trigger"], state="active", started_at=iso(now),
                                             last_evidence_at=iso(now), decoys="[]", redirect=json.dumps(rd),
@@ -318,8 +319,8 @@ class MapeKController:
                         self._record(c, cycle_id, trigger=a["trigger"], src_ip=src, attack_class=a["attack_class"],
                                      assessment=a["assessment"], max_confidence=a.get("max_confidence"),
                                      evidence_count=a.get("evidence_count"), action="engage", result="ok",
-                                     reason=f"engagement #{eid} opened: {a['reason']}. The source is redirected "
-                                            f"to its decoy as soon as the decoy is Ready",
+                                     reason=f"engagement #{eid} opened for {src} (scenario {scen}): {a['reason']}. "
+                                            f"The source is redirected to its decoy as soon as the decoy is Ready",
                                      evidence={**(a.get("evidence") or {}), "engagement_id": eid})
                         a = {**a, "engagement_id": eid}
             elif eng and a.get("sustains"):
@@ -328,6 +329,12 @@ class MapeKController:
                                                   f"engagement #{eng['id']} kept (hysteresis)"}
             out.append(a)
         return out
+
+    def scenario_of(self, ip: str | None) -> str:
+        """Traffic-lab scenario of a source pod (for the event log), or UNKNOWN."""
+        from live import labsources
+        hit = labsources.get(self.cfg).get(str(ip)) if ip else None
+        return f"{hit['scenario']} ({hit['job']})" if hit else "UNKNOWN"
 
     def decoy_ips(self) -> set[str]:
         from live import labsources
@@ -363,7 +370,8 @@ class MapeKController:
             self._record(c, cycle_id, trigger="engagement", src_ip=e["src_ip"], attack_class=e["attack_class"],
                          action="redirect", decoy_profile=d["profile"], decoy_name=d["name"],
                          result="ok" if new.get("applied") else "skipped", assessment="n/a",
-                         reason=f"engagement #{e['id']}: decoy {d['name']} is Ready. Redirect: {new['reason']}",
+                         reason=f"engagement #{e['id']} ({e['src_ip']}, scenario {self.scenario_of(e['src_ip'])}): "
+                                f"decoy {d['name']} is Ready ({to}). Redirect: {new['reason']}",
                          evidence={"engagement_id": e["id"]})
             out.setdefault("redirected", []).append(e["src_ip"])
 
@@ -608,10 +616,18 @@ class MapeKController:
                     secs = (now - parse(r["created_at"])).total_seconds()
                     db.update_row(c, "decoys", r["id"], status="active", ready_at=iso(now), deploy_seconds=secs)
                     log.info("decoy %s ready after %.1fs (%s endpoint(s))", r["name"], secs, k.get("endpoints"))
+                    self._record(c, cycle_id, trigger="readiness", action="decoy_ready", decoy_profile=r["profile"],
+                                 decoy_name=r["name"], result="ok", assessment="n/a", simulated=int(r["simulated"]),
+                                 reason=f"{r['name']} Ready after {secs:.1f}s: {k['ready_replicas']} ready replica(s), "
+                                        f"{k.get('endpoints')} Service endpoint(s)")
                     out["ready"].append(r["name"])
                 elif (now - parse(r["created_at"])).total_seconds() > self.d["deploy_timeout_seconds"]:
                     mgr.remove(r["name"])
                     db.update_row(c, "decoys", r["id"], status="failed", removed_at=iso(now), error="readiness timeout")
+                    self._record(c, cycle_id, trigger="readiness", action="deploy_failed", decoy_profile=r["profile"],
+                                 decoy_name=r["name"], result="failed", assessment="n/a", simulated=int(r["simulated"]),
+                                 reason=f"{r['name']} not Ready within {self.d['deploy_timeout_seconds']}s "
+                                        f"({k['ready_replicas']} ready replica(s), {k.get('endpoints')} endpoint(s)); removed")
                     continue
             out["interactions"] += self._collect_for(c, r["name"])
 
