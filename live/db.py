@@ -141,7 +141,7 @@ _MIGRATIONS = {"captures": {"window_s": "REAL", "session_id": "INTEGER"},
                               "session_id": "INTEGER"},
                # node-specific deception: the attacked pod / node, the attacker pod, decoy pod IPs
                "engagements": {"target": "TEXT", "attacker": "TEXT", "node": "TEXT"},
-               "decoys": {"node": "TEXT", "pod_ips": "TEXT"}}
+               "decoys": {"node": "TEXT", "pod_ips": "TEXT", "pods": "TEXT"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

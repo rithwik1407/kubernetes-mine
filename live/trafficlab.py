@@ -195,8 +195,8 @@ def resolve_target(scenario: str, target: str | None, cfg: dict[str, Any], core=
 GEN_PARAMS: dict[str, dict[str, Any]] = {
     "concurrency":  {"env": "CONCURRENCY", "type": int, "min": 1, "max": 16, "modes": ["port_scan", "brute_force", "web_attack"],
                      "help": "parallel workers (rate is about concurrency / delay per second)"},
-    "duration_s":   {"env": "TIME_BUDGET_S", "type": int, "min": 10, "max": 270, "modes": None,
-                     "help": "stop after this many seconds even if count is not reached"},
+    "minutes":      {"env": "RUN_SECONDS", "type": float, "min": 0.5, "max": 60, "modes": None,
+                     "help": "run for this many minutes: the scenario repeats at its normal rate until the time is up"},
     "target_port":  {"env": None, "type": int, "min": 1, "max": 65535, "modes": ["port_scan", "brute_force", "web_attack", "slow_dos", "web_recon"],
                      "help": "port on the target (brute_force: 22/2222 = SSH-style connects)"},
     "port_start":   {"env": "PORT_START", "type": int, "min": 1, "max": 65535, "modes": ["port_scan"], "help": "first port to scan"},
@@ -255,10 +255,15 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
     count = d_count if count is None else count
     delay = d_delay if delay is None else delay
     deadline = int(tl.get("job_deadline_seconds", 300))
+    params = check_params(params)
+    run_s = int(round(params["minutes"] * 60)) if params.get("minutes") else 0
+    if run_s:
+        # time-based run: the Job's limit follows the chosen minutes, plus room for the pod to
+        # start (image pull) and for the generator to finish its last action and log a summary
+        deadline = run_s + int(tl.get("job_start_margin_seconds", 120))
     if target is None:
         t = tl["targets"][sc.get("default_target") or next(iter(tl["targets"]))]
         target = f"{t['host']}:{t['port']}"
-    params = check_params(params)
     if params.get("target_port") and "," not in target:
         target = f"{target.rsplit(':', 1)[0]}:{params['target_port']}"
     env = [
@@ -269,7 +274,7 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "PYTHONDONTWRITEBYTECODE", "value": "1"},
         {"name": "PYTHONUNBUFFERED", "value": "1"},
         # finish (and log why) before Kubernetes kills the pod at activeDeadlineSeconds
-        {"name": "TIME_BUDGET_S", "value": str(max(10, deadline - 30))},
+        {"name": "TIME_BUDGET_S", "value": str(run_s if run_s else max(10, deadline - 30))},
         # ... counted from the Job's creation, not from when the script started: a pod that
         # waits for an image pull or a slow node would otherwise run past the deadline
         {"name": "JOB_DEADLINE_EPOCH", "value": str(int(time.time()) + deadline - 25)},
@@ -277,7 +282,9 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "REDIRECT_FILE", "value": "/etc/podinfo/annotations"},
     ]
     env += [{"name": str(k), "value": str(v)} for k, v in (sc.get("env") or {}).items()]
-    over = {GEN_PARAMS[k]["env"]: str(v) for k, v in params.items() if GEN_PARAMS[k]["env"]}
+    over = {GEN_PARAMS[k]["env"]: str(v) for k, v in params.items() if GEN_PARAMS[k]["env"] and k != "minutes"}
+    if run_s:
+        over["RUN_SECONDS"] = str(run_s)
     env = [e for e in env if e["name"] not in over] + [{"name": k, "value": v} for k, v in over.items()]
     container = {
         "name": "generator", "image": tl.get("image", "python:3.13-alpine"),
@@ -468,7 +475,7 @@ def summarize_log(text: str) -> dict[str, Any]:
         last = rec.get("ts")
         a = rec["action"]
         actions[a] += 1
-        if a in ("start", "done", "interrupted", "slow_established"):
+        if a in ("start", "done", "interrupted", "slow_established", "budget_exhausted", "run_complete", "redirected"):
             continue
         if rec.get("error"):
             err += 1

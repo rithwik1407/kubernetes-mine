@@ -116,6 +116,19 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
             notes.append(f"capture not started: {e}")
     elif capture_state.get("running"):
         notes.append("capture already running")
+    # the target apps must be up (and reachable on localhost) before traffic is aimed at them
+    if cfg.get("target_apps") is not None:
+        try:
+            from live import targetaccess
+            from live.k8s_status import targets_status
+            tg = targets_status(cfg)
+            if tg["connected"] and not tg["all_running"]:
+                res = targetaccess.start(cfg, wait=True)
+                notes.append("target apps started: " + "; ".join(res["steps"]))
+            elif tg["connected"]:
+                targetaccess.ensure_forwards(cfg)
+        except Exception as e:  # noqa: BLE001
+            notes.append(f"WARNING: could not bring the target apps up: {str(e)[:200]}")
     try:
         lab = check_ready(cfg)
         if lab.get("generator_current") is False:
@@ -225,6 +238,19 @@ def _remember_pod_ips(run: dict[str, Any], cfg: dict[str, Any]) -> None:
         _update_run(run["id"], cfg, jobs=run["jobs"])
 
 
+def _keep_final_counts(run: dict[str, Any], cfg: dict[str, Any]) -> None:
+    """Store each Job's answered / failed request counts in the run, so the per-target
+    request counts survive the Job's cleanup (ttlSecondsAfterFinished)."""
+    for j in run["jobs"]:
+        try:
+            v = job_detail(j["job"], cfg, tail=200000)["verification"]
+        except Exception:  # noqa: BLE001
+            v = (j.get("log_snapshot") or {}).get("verification")
+        if v and v.get("lines"):
+            j["answered"], j["failed"] = v.get("ok", 0), v.get("errors", 0)
+    _update_run(run["id"], cfg, jobs=run["jobs"])
+
+
 def _snapshot_logs(run: dict[str, Any], states: dict[str, dict[str, Any]], cfg: dict[str, Any]) -> None:
     """Keep a summary of each running generator's log in the run record. Kubernetes deletes
     the pod when a Job hits activeDeadlineSeconds, and with it the log, so without this a
@@ -265,6 +291,7 @@ def _watch(run_id: str, cfg: dict[str, Any], poll_s: float = 3.0) -> None:
             if states and all(s.get("state") in FINISHED for s in states.values()):
                 break
             time.sleep(poll_s)
+        _keep_final_counts(run, cfg)
         finished_at = _now()
         _update_run(run_id, cfg, finished_at=finished_at,
                     auto_stop={"state": "draining", "detail": f"all Jobs finished; waiting {drain:g}s + last window"})

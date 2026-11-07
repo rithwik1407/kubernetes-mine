@@ -314,8 +314,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <!-- D. WINDOW -->
   <section class="page" id="p-window" data-title="Adaptive observation window" data-sub="Chosen by the capture service after every window from measured packet rate and threat evidence">
     <div class="grid kpis" id="winKpis"></div>
-    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Window size over time</h2><p class="hint" id="winChartHint">The window length the capture service chose after each window. Dots mark a change, coloured by the rule that made it; red bands are periods with threat evidence.</p></div>
-      <div class="seg" role="group" aria-label="Time span" id="winSpan"><button data-span="15">15 min</button><button data-span="60" class="on">1 h</button><button data-span="360">6 h</button></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Window size over time</h2><p class="hint" id="winChartHint">The window length the capture service chose after each window, last 6 hours. Dots mark a change, coloured by the rule that made it; red bands are periods with threat evidence. Scroll to zoom in time, drag to pan, double-click to reset.</p></div></div>
       <div id="winChart" class="chart"></div></div>
     <div class="card" style="margin-top:14px"><h2>Policy</h2><p class="hint">After every window the rules below are checked in order and the first that matches picks the next size. Values come from config/live.yaml → capture.window.</p>
       <div id="winPolicy"></div><div id="winSettings" style="margin-top:14px"></div></div>
@@ -334,11 +333,11 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
             <fieldset class="field picks"><legend>Target pods / services</legend><div id="labTargets" class="picklist"></div><span class="err" id="labTgErr"></span></fieldset>
           </div>
           <div class="form" style="margin-top:10px">
-            <label class="field"><span>Count <span class="tip" tabindex="0" title="How many requests, login attempts or slow connections each Job makes (1–5000). Port scan ignores it and scans its configured port range (1–1024). More = a longer, louder run. Leave empty to use each attack's default.">?</span></span><input id="labCount" type="number" min="1" max="5000" placeholder="per-attack default"><span class="err"></span></label>
+            <label class="field"><span>Run for (minutes) <span class="tip" tabindex="0" title="Each Job repeats its attack at the attack's normal rate until this time is up (0.5–60 minutes). The Job's Kubernetes time limit is set to this time plus 2 minutes for the pod to start, so a run never fails on the limit.">?</span></span><input id="labMinutes" type="number" min="0.5" max="60" step="0.5" value="2" required><span class="err"></span></label>
             <label class="field"><span>Delay (s) <span class="tip" tabindex="0" title="Seconds the generator waits between two requests (0–10). 0 = as fast as possible. Smaller delays mean more flows per capture window, which is what the burst / port-sweep detectors look for. Leave empty to use each attack's default.">?</span></span><input id="labDelay" type="number" min="0" max="10" step="0.01" placeholder="per-attack default"><span class="err"></span></label>
             <label class="field check"><span><input id="labAutoStop" type="checkbox" checked> Stop capture when done <span class="tip" tabindex="0" title="When every Job of the run has finished (succeeded or failed), wait a short drain period so the last capture window is scored, then stop capture automatically. The Stop button on Live Traffic still overrides it.">?</span></span></label>
           </div>
-          <details id="labAdv" style="margin-top:8px"><summary class="hint" style="cursor:pointer">Generator parameters (rate, duration, concurrency, port, payloads)</summary>
+          <details id="labAdv" style="margin-top:8px"><summary class="hint" style="cursor:pointer">Generator parameters (concurrency, port, payloads)</summary>
             <p class="hint" style="margin:6px 0">Empty = the attack's default. Each value is checked by the server and passed to the generator as one environment variable; a parameter only applies to the attacks listed under it.</p>
             <div class="form" id="labParams"></div></details>
         </form>
@@ -369,8 +368,8 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Live deception</h2><p class="hint">Each engaged attacker: the pod its attack hits, the decoy placed on that pod's node, and the traffic that has reached the decoy. Decoy flows are counted from captured flows between the attacker and the decoy pod IPs; requests from the decoy's own log.</p></div></div>
       <div id="decFlow" class="flowdia" style="margin-bottom:12px"></div>
       <div id="decLive"><div class="loading">Loading…</div></div></div>
-    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detected but not engaged</h2><p class="hint">Sources the model or the behaviour rules flagged in the last 15 minutes that have no decoy, with the controller's reason (severity or flow threshold not met, cooldown, decoy limit, control-plane or decoy traffic).</p></div></div><div id="decNot"></div></div>
-    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Decoy pods</h2><p class="hint">Live from Kubernetes (namespace ids-deception)</p></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detected but not engaged</h2><p class="hint">Every source the model or the behaviour rules flagged in the last 6 hours that did not get a decoy when it was flagged, one row per source, newest first. A detection only engages deception when one source sends at least the class's <b>N flows</b> within <b>T seconds</b> at or above the chosen severity (see Detection thresholds). Otherwise the row says why: too few flows, below severity, cooldown after a release, decoy limit, control-plane / allowlisted, reply traffic of a target, or decoy traffic. If the source was engaged later, the Later column links to it.</p></div></div><div id="decNot"></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Recent attacker and decoy pods</h2><p class="hint">Every attacker pod that was engaged and every decoy pod of the last 6 hours, including pods that are already gone. Newest first; rows never move or disappear on a refresh, only their state updates.</p></div>
       <button class="btn small" id="decCmdsBtn" aria-expanded="false" aria-controls="decCmdsWrap">Check it yourself</button></div>
       <div id="decCmdsWrap" hidden style="margin-bottom:12px;padding:10px 12px;border:1px solid var(--border-2);border-radius:10px"><p class="hint" style="margin-top:0">Run these on the machine with your kubeconfig. Names are filled in from the current engagement.</p><div id="decCmds"></div></div>
       <div id="decPods"></div></div>
@@ -395,6 +394,9 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <!-- F. KUBERNETES -->
   <section class="page" id="p-k8s" data-title="Kubernetes" data-sub="Read through the least-privilege ids-controller identity">
     <div class="grid kpis" id="k8sKpis"><div class="loading">Contacting the API server…</div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Target apps</h2><p class="hint" id="tgHint">Node-RED, Grafana and InfluxDB, reachable on this machine through a kubectl port-forward on 127.0.0.1.</p></div>
+      <button class="btn small primary" id="tgStart" title="Deploy any missing app, wait until every pod is Ready and (re)start the localhost port-forwards">Start target apps</button></div>
+      <div id="tgApps"><div class="loading">Checking the target apps…</div></div></div>
     <div class="card" style="margin-top:14px"><h2>Nodes</h2><div id="k8sNodes"></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Pods</h2><p class="hint">Lab namespaces: target-apps, ids-traffic, ids-deception</p></div>
       <label class="filter">Namespace <select id="k8sNs"><option value="">all lab namespaces</option></select></label></div><div id="k8sPods"></div></div>
@@ -402,7 +404,6 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       <div class="card"><h2>Deployments</h2><div id="k8sDeps"></div></div>
       <div class="card"><h2>Services</h2><div id="k8sSvcs"></div></div>
     </div>
-    <div class="card" style="margin-top:14px"><h2>Namespaces</h2><div id="k8sNamespaces"></div></div>
   </section>
 
   <!-- G. MODEL -->
@@ -568,11 +569,11 @@ function layout(extra = {}) {
     bargap: 0.35, transition: { duration: 600, easing: "cubic-in-out" },
   }, extra);
 }
-function plot(id, traces, lay, emptyMsg) {
+function plot(id, traces, lay, emptyMsg, config = {}) {
   const el = $(id);
   if (!traces) { Plotly.purge(el); el.innerHTML = empty(emptyMsg || "No data yet"); return; }
   if (el.querySelector(".empty")) el.innerHTML = "";
-  Plotly.react(el, traces, layout(lay), { displayModeBar: false, responsive: true });
+  Plotly.react(el, traces, layout(lay), Object.assign({ displayModeBar: false, responsive: true }, config));
 }
 
 /* ---------------- flow diagrams ----------------
@@ -885,7 +886,7 @@ async function runEval(btn) {
 /* ---------------- D. Window ---------------- */
 async function pageWindow() {
   const changed = $("winChanged").checked;
-  const [ws, all] = await Promise.all([api("/api/window/status"), api(`/api/window/history?limit=${(S.winSpan || 60) >= 360 ? 5000 : 1500}`)]);
+  const [ws, all] = await Promise.all([api("/api/window/status"), api("/api/window/history?limit=5000")]);
   const p = ws.policy, ld = ws.last_decision, ev = ld ? ld.evidence || {} : {};
   $("winKpis").html = [
     kpi("Current window", ws.running ? fmt(ws.current_window_s) + " s" : NA, ws.running ? "capture running" : "capture not running", ws.running ? "ok" : "idle"),
@@ -903,7 +904,7 @@ async function pageWindow() {
   $("winSettings").html = `<h3 style="font-size:13px;margin:0 0 6px">Settings</h3>` + table([
     { h: "Setting", f: r => `<span class="mono">${esc(r.key)}</span>` }, { h: "Value", f: r => `<b>${esc(r.value)}</b>` }, { h: "What it does", wrap: 1, k: "meaning" }], p.settings || []);
   // one segment per continuous capture; a gap (capture stopped) breaks the line instead of a long flat step
-  const span = +(S.winSpan || 60), cut = Date.now() - span * 60e3;
+  const span = 360, cut = Date.now() - span * 60e3;
   const pts = all.filter(r => r.rule !== "start" && new Date(r.created_at).getTime() >= cut).reverse();
   const gapMs = Math.max(...p.sizes) * 4000 + 15000;
   const xs = [], ys = [], txt = [];
@@ -930,9 +931,12 @@ async function pageWindow() {
       customdata: rs.map(r => [r.previous_s ?? "—", r.reason.slice(0, 90)]), hovertemplate: "%{x|%H:%M:%S}: %{customdata[0]} s → %{y} s<br>" + RULE_NAME[rule] + ": %{customdata[1]}<extra></extra>" }; }),
   ] : null, { showlegend: rulesSeen.length > 0, legend: { orientation: "h", y: 1.12, x: 0, font: { size: 11, color: cssVar("--text-2") } }, margin: { l: 52, r: 16, t: 28, b: 36 },
     shapes: bands.map(([a, b]) => ({ type: "rect", xref: "x", yref: "paper", x0: a, x1: a === b ? new Date(new Date(b).getTime() + 3000) : b, y0: 0, y1: 1, fillcolor: crit, opacity: 0.08, line: { width: 0 }, layer: "below" })),
-    xaxis: Object.assign(layout().xaxis, { range: [new Date(Math.max(cut, pts.length ? new Date(pts[0].created_at).getTime() - 5000 : cut)), new Date()] }),
-    yaxis: Object.assign(layout().yaxis, { title: { text: "window (s)", font: { size: 11 } }, tickvals: p.sizes, ticktext: p.sizes.map(x => x + " s"), range: [0, Math.max(...p.sizes) * 1.18] }) },
-    `No capture windows in the last ${span >= 60 ? span / 60 + " h" : span + " min"}`);
+    // wheel = zoom in time, drag = pan, double-click = back to everything; uirevision keeps the
+    // user's zoom while the page refreshes, the y axis stays fixed on the window sizes
+    uirevision: "win", dragmode: "pan",
+    xaxis: Object.assign(layout().xaxis, { autorange: true }),
+    yaxis: Object.assign(layout().yaxis, { title: { text: "window (s)", font: { size: 11 } }, tickvals: p.sizes, ticktext: p.sizes.map(x => x + " s"), range: [0, Math.max(...p.sizes) * 1.18], fixedrange: true }) },
+    "No capture windows in the last 6 hours", { scrollZoom: true, doubleClick: "reset", displayModeBar: false });
   const rows = changed ? all.filter(r => r.changed) : all;
   $("winTable").html = table([
     { h: "Time", f: r => time(r.created_at) }, { h: "Change", f: r => `${r.previous_s ?? "—"} → <b>${r.next_s}</b> s` }, { h: "Rule", f: r => esc(r.rule) },
@@ -945,7 +949,7 @@ async function loadScenarios() {
   if (S.scenarios) return;
   S.scenarios = await api("/api/trafficlab/scenarios");
   $("labScenarios").html = Object.entries(S.scenarios.scenarios).map(([k, v]) =>
-    `<label title="${esc(v.description)}"><input type="checkbox" name="labSc" value="${esc(k)}" ${k === "port_scan" ? "checked" : ""}> ${esc(k)} <small>${v.expect_class ? "expects " + esc(v.expect_class) : "no expected class"} · ${fmt(v.count)} × ${v.delay}s</small></label>`).join("");
+    `<label title="${esc(v.description)}"><input type="checkbox" name="labSc" value="${esc(k)}" ${k === "port_scan" ? "checked" : ""}> ${esc(k)} <small>${v.expect_class ? "expects " + esc(v.expect_class) : "no expected class"} · every ${v.delay} s</small></label>`).join("");
   $("labTargets").html = Object.entries(S.scenarios.targets).map(([k, v]) =>
     `<label><input type="checkbox" name="labTg" value="${esc(k)}" ${k === "nodered" ? "checked" : ""}> ${esc(k)} <small>${esc(v.host.split(".")[0])}:${v.port}</small></label>`).join("");
   document.querySelectorAll('input[name="labSc"]').forEach(c => c.addEventListener("change", onScenario));
@@ -955,7 +959,6 @@ const picked = name => [...document.querySelectorAll(`input[name="${name}"]:chec
 function onScenario() {
   const sel = picked("labSc"), sc = S.scenarios.scenarios;
   const one = sel.length === 1 ? sc[sel[0]] : null;
-  $("labCount").placeholder = one ? `default ${one.count}` : "per-attack default";
   $("labDelay").placeholder = one ? `default ${one.delay}` : "per-attack default";
   const tg = picked("labTg"), probes = sel.filter(k => sc[k].mode === "decoy_probe").length, jobs = (sel.length - probes) * Math.max(1, tg.length) + probes;
   $("labDesc").textContent = !sel.length ? "Select at least one attack type." :
@@ -965,15 +968,15 @@ function onScenario() {
 function labBody() {
   const f = $("labForm"); let ok = true;
   f.querySelectorAll(".err").forEach(e => e.textContent = "");
-  const c = $("labCount"), d = $("labDelay"), sc = picked("labSc"), tg = picked("labTg");
+  const m = $("labMinutes"), d = $("labDelay"), sc = picked("labSc"), tg = picked("labTg");
   if (!sc.length) { $("labScErr").textContent = "select at least one attack type"; ok = false; }
   const needsTarget = sc.some(k => S.scenarios.scenarios[k].mode !== "decoy_probe");
   if (needsTarget && !tg.length) { $("labTgErr").textContent = "select at least one target"; ok = false; }
-  if (c.value !== "" && (!c.checkValidity() || !Number.isInteger(+c.value))) { c.nextElementSibling.textContent = "whole number 1–5000"; ok = false; }
+  if (m.value === "" || !m.checkValidity()) { m.nextElementSibling.textContent = "0.5–60 minutes"; ok = false; }
   if (d.value !== "" && !d.checkValidity()) { d.nextElementSibling.textContent = "number 0–10"; ok = false; }
   if (!ok) throw new ApiError(422, "Fix the highlighted fields");
   const body = { scenarios: sc, targets: needsTarget ? tg : null, auto_stop: $("labAutoStop").checked };
-  if (c.value !== "") body.count = +c.value;
+  body.minutes = +m.value;
   if (d.value !== "") body.delay = +d.value;
   const params = {};
   $("labParams").querySelectorAll("[data-param]").forEach(el => {
@@ -988,9 +991,9 @@ function labBody() {
 }
 function renderParams() {
   const ps = S.scenarios.params || {}; if ($("labParams").childElementCount) return;
-  const label = { concurrency: "Concurrency", duration_s: "Max duration (s)", target_port: "Target port", port_start: "Scan from port", port_end: "Scan to port",
+  const label = { concurrency: "Concurrency", target_port: "Target port", port_start: "Scan from port", port_end: "Scan to port",
     scan_timeout: "Scan timeout (s)", slow_conns: "Slow connections", slow_hold_s: "Hold time (s)", login_path: "Login path", payload_set: "Payloads" };
-  $("labParams").innerHTML = Object.entries(ps).map(([k, p]) => {
+  $("labParams").innerHTML = Object.entries(ps).filter(([k]) => k !== "minutes").map(([k, p]) => {
     const tip = `${p.help}. Applies to: ${p.modes ? p.modes.join(", ") : "all attacks"}.`;
     const input = p.choices ? `<select data-param="${k}"><option value="">default</option>${p.choices.map(c => `<option>${esc(c)}</option>`).join("")}</select>`
       : `<input data-param="${k}" type="${p.type === "str" ? "text" : "number"}" ${p.type === "str" ? `maxlength="64" placeholder="/login"` : `min="${p.min}" max="${p.max}" step="${p.type === "float" ? "0.1" : "1"}" placeholder="default"`}>`;
@@ -1110,7 +1113,8 @@ function policyBody() {
 const podRef = (p, ip) => p && p.pod ? `<span class="mono">${esc(p.namespace)}/${esc(p.pod)}</span><br><span class="mono">${esc(p.ip || ip || "")}</span>` : `<span class="mono">${esc(ip || (p || {}).ip || "—")}</span> <span class="na">(not a lab pod)</span>`;
 const nodeTag = n => n ? `<span class="pill s-idle" title="Kubernetes node"><span class="dot"></span>node ${esc(n)}</span>` : `<span class="na">node —</span>`;
 function renderLive(lv) {
-  const engs = lv.engagements.filter(e => e.state === "active" || (e.released_at && Date.now() - new Date(e.released_at).getTime() < 15 * 60e3));
+  // every engagement of the last 6 hours (latest 20), newest on top (ordered by id, so a refresh never reorders them)
+  const engs = lv.engagements.filter(e => e.state === "active" || Date.now() - new Date(e.started_at).getTime() < 6 * 3600e3).sort((a, b) => b.id - a.id);
   $("decLive").html = engs.length ? engs.map(e => {
     const rd = e.redirect || {}, tr = e.traffic || {}, t = e.target || {}, a = e.attacker || {};
     const svc = (t.services || []).map(s => `${s.name}:${(s.ports || []).join("/")}`).join(", ");
@@ -1134,11 +1138,16 @@ function renderLive(lv) {
       </div>
       <p class="hint" style="margin-top:6px">${esc(rd.reason || "")}</p></div>`;
   }).join("") : empty("No engaged attacker", "When deception is enabled and an attack crosses the thresholds, its attacker, target pod, node and decoy appear here.");
-  $("decPods").html = lv.decoy_pods_error ? errBox(lv.decoy_pods_error) : table([
-    { h: "Pod", f: r => `<span class="mono">${esc(r.pod)}</span>` }, { h: "Namespace", k: "namespace" }, { h: "Node", k: "node" },
-    { h: "Pod IP", f: r => `<span class="mono">${esc(r.ip || "—")}</span>` },
-    { h: "Status", f: r => r.deleting ? pill("Terminating", "idle") : pill(r.ready ? "Running" : r.phase || "Pending", r.ready ? "ok" : "pending") }, { h: "Created", f: r => `${time(r.created)} <span class="na">${ago(r.created)}</span>` },
-  ], lv.decoy_pods, { emptyTitle: "No decoy pods", emptyBody: "Decoy pods appear here as soon as they are scheduled." });
+  api("/api/deception/recent-pods?minutes=360").then(rp => {
+    $("decPods").html = (lv.decoy_pods_error ? errBox("Live decoy pods: " + lv.decoy_pods_error) : "") + table([
+      { h: "Role", f: r => pill(r.role, r.role === "attacker" ? "error" : "degraded") },
+      { h: "Pod", wrap: 1, f: r => `<span class="mono">${esc(r.namespace || "")}/${esc(r.pod)}</span>${r.decoy ? `<br><span class="na">decoy ${esc(r.decoy)}</span>` : r.scenario ? `<br><span class="na">${esc(r.scenario)}</span>` : ""}` },
+      { h: "Node", f: r => r.node ? esc(r.node) : NA }, { h: "Pod IP", f: r => `<span class="mono">${esc(r.ip || "—")}</span>` },
+      { h: "State", f: r => pill(r.state || "—", /Running|redirected|engaged/.test(r.state || "") ? "ok" : r.state === "removed" || r.state === "released" ? "idle" : "pending") },
+      { h: "First seen", f: r => r.first_seen ? `${time(r.first_seen)} <span class="na">${ago(r.first_seen)}</span>` : "—" },
+      { h: "Engagement", f: r => (r.engagements || []).map(id => `<button class="btn small" data-replay="${esc(id)}" title="Replay engagement #${esc(id)}">#${esc(id)} flow</button>`).join(" ") || "—" },
+    ], rp.pods, { emptyTitle: "No attacker or decoy pods in the last 6 hours", emptyBody: "They appear here as soon as deception engages an attacker." });
+  }).catch(e => { $("decPods").html = errBox(e.message); });
   const e0 = engs.find(e => e.state === "active") || engs[0], a = (e0 && e0.attacker) || {}, rd = (e0 && e0.redirect) || {};
   const ap = a.pod ? `${a.pod} -n ${a.namespace}` : "<attacker-pod> -n ids-traffic", dn = rd.decoy || (e0 && e0.decoys[0]) || "<decoy-name>";
   const cmds = [
@@ -1209,13 +1218,13 @@ async function pageDeception() {
     api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200"), api("/api/deception/live?limit=20")]);
   renderLive(lv);
   api("/api/live/flow-graph?seconds=180").then(g => flowDiagram("decFlow", g, { emptyTitle: "No traffic in the last 3 minutes", emptyBody: "Attacker → target → decoy paths appear here while an attack runs." })).catch(() => { });
-  const ne = await api("/api/deception/not-engaged?minutes=15");
-  $("decNot").html = !st.enabled ? empty("Automatic deception is disabled", "Nothing is engaged while it is off. Enable it above; it acts on new detections only.") : table([
-    { h: "Last seen", f: r => `${time(r.created_at)} <span class="na">${ago(r.created_at)}</span>` }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>${r.src_pod ? `<br><span class="na mono">${esc(r.src_pod)}</span>` : ""}` },
-    { h: "Threat", f: r => r.attack_class ? (CLASS_COLORS[r.attack_class] ? clsTag(r.attack_class) : esc(r.attack_class)) : "—" },
-    { h: "Flows", num: 1, f: r => fmt(r.evidence_count) }, { h: "Mean conf.", num: 1, f: r => r.max_confidence == null ? "—" : fmt(r.max_confidence, 2) },
-    { h: "Outcome", f: r => pill(r.action.replace("_", " "), r.action === "monitor" || r.action === "await_evidence" ? "idle" : "degraded") }, { h: "Why no decoy", wrap: 1, k: "reason" },
-  ], ne, { emptyTitle: "Every detected source is engaged", emptyBody: "Sources below the thresholds would be listed here with the reason." });
+  const ne = await api("/api/deception/not-engaged?minutes=360");
+  $("decNot").html = (!st.enabled ? `<div class="errbox" style="border-color:var(--warning);color:var(--warning-ink)">Automatic deception is disabled: new detections are recorded but nothing is engaged. Enable it above.</div>` : "") + table([
+    { h: "Seen", f: r => `${time(r.first_seen)} <span class="na">${ago(r.first_seen)}</span><br><span class="na">last ${time(r.last_seen)} · ${fmt(r.decisions)} check(s)</span>` },
+    { h: "Source", wrap: 1, f: r => `<span class="mono">${esc(r.src_ip)}</span>${r.src_pod ? `<br><span class="na mono" style="word-break:break-all">${esc(r.src_pod)}</span>` : ""}` },
+    { h: "Threat", wrap: 1, f: r => (r.attack_class ? (CLASS_COLORS[r.attack_class] ? clsTag(r.attack_class) : esc(r.attack_class)) : "—") + `<br><span class="na">${fmt(r.max_flows)} flows · conf. ${r.max_confidence == null ? "—" : fmt(r.max_confidence, 2)}</span>` },
+    { h: "Why not engaged", wrap: 1, f: r => `${pill(r.category_label, r.category === "flows" || r.category === "severity" ? "idle" : "degraded")} ${r.engaged_later ? `<button class="btn small" data-replay="${esc(r.engaged_later.id)}">engaged later: #${esc(r.engaged_later.id)}</button>` : ""}<div class="hint" style="margin:3px 0 0;white-space:normal;min-width:240px">${esc(r.category_why)}</div><details><summary class="na" style="cursor:pointer">controller reason</summary><span class="hint" style="white-space:normal">${esc(r.reason || "")}</span></details>` },
+  ], ne, { emptyTitle: "Nothing detected without a decoy in the last 6 hours", emptyBody: "Sources flagged by the model or the behaviour rules that did not get a decoy are listed here, with the reason." });
   S.policy = pol;
   const ps = $("decProfile"); if (!ps.options.length) Object.keys(pol.profiles).forEach(p => ps.add(new Option(p, p)));
   $("decEnable").disabled = st.enabled; $("decDisable").disabled = !st.enabled;
@@ -1260,7 +1269,7 @@ async function pageDeception() {
 /* ---------------- F. Kubernetes ---------------- */
 async function pageK8s() {
   const k = await api("/api/kubernetes/status"); S.k8s = k;
-  if (!k.connected) { $("k8sKpis").innerHTML = `<div class="card" style="grid-column:1/-1">${errBox("Kubernetes unreachable: " + k.error)}</div>`; ["k8sNodes", "k8sPods", "k8sDeps", "k8sSvcs", "k8sNamespaces"].forEach(i => $(i).innerHTML = ""); return; }
+  if (!k.connected) { $("k8sKpis").innerHTML = `<div class="card" style="grid-column:1/-1">${errBox("Kubernetes unreachable: " + k.error)}</div>`; ["k8sNodes", "k8sPods", "k8sDeps", "k8sSvcs"].forEach(i => $(i).innerHTML = ""); return; }
   const nss = Object.entries(k.namespaces), pods = nss.flatMap(([ns, e]) => (e.pods || []).map(p => Object.assign({ ns }, p)));
   const deps = nss.flatMap(([ns, e]) => (e.deployments || []).map(d => Object.assign({ ns }, d))), svcs = nss.flatMap(([ns, e]) => (e.services || []).map(s => Object.assign({ ns }, s)));
   const ready = k.nodes.filter(n => n.ready === "True").length, restarts = pods.reduce((a, p) => a + p.restarts, 0), bad = pods.filter(p => !["running", "completed", "succeeded"].includes((p.state || "").toLowerCase()));
@@ -1286,8 +1295,30 @@ async function pageK8s() {
     pods.filter(p => !nsSel.value || p.ns === nsSel.value), { emptyTitle: "No pods" });
   $("k8sDeps").innerHTML = table([{ h: "Namespace", k: "ns" }, { h: "Deployment", f: r => esc(r.name) + (r.decoy ? " " + pill("decoy", "degraded") : "") }, { h: "Ready", f: r => pill(`${r.ready}/${r.replicas}`, r.ready >= r.replicas ? "ok" : "deploying") }], deps);
   $("k8sSvcs").innerHTML = table([{ h: "Namespace", k: "ns" }, { h: "Service", f: r => esc(r.name) + (r.decoy ? " " + pill("decoy", "degraded") : "") }, { h: "Type", k: "type" }, { h: "Cluster IP", f: r => `<span class="mono">${esc(r.cluster_ip)}</span>` }, { h: "Ports", f: r => esc(r.ports.join(", ")) }], svcs);
-  $("k8sNamespaces").innerHTML = k.all_namespaces ? table([{ h: "Namespace", k: "name" }, { h: "Phase", f: r => pill(r.phase, r.phase === "Active" ? "ok" : "degraded") }, { h: "Lab", f: r => k.namespaces[r.name] ? "yes" : "" }], k.all_namespaces) : errBox(k.all_namespaces_error || "namespace list unavailable");
+  renderTargets();
 }
+
+async function renderTargets() {
+  let t; try { t = await api("/api/targets/access?minutes=15"); } catch (e) { $("tgApps").html = errBox(e.message); return; }
+  const st = t.start || {};
+  $("tgStart").disabled = st.state === "running"; $("tgStart").textContent = st.state === "running" ? "Starting…" : "Start target apps";
+  $("tgHint").html = `Node-RED, Grafana and InfluxDB, reachable on this machine through a kubectl port-forward on 127.0.0.1 (restarted automatically if it stops). Traffic counts cover the last ${t.minutes} min. "Requests answered" comes from the generator logs of finished lab runs; captured flows to the pod stop growing once an attacker is redirected to a decoy.` +
+    (st.state === "failed" ? ` <span style="color:var(--critical-ink)">Last start failed: ${esc(st.error)}</span>` : st.state === "done" ? ` Last started ${ago(st.at)}.` : "");
+  $("tgApps").html = !t.connected ? errBox("Kubernetes unreachable: " + (t.error || "")) : table([
+    { h: "App and pod", f: a => `<b>${esc(a.key)}</b> <span class="na mono">svc/${esc(a.service || a.key)}:${esc(a.port)}</span><br>` +
+        ((a.pods || []).map(p => `${pill(p.state, p.state === "running" ? "ok" : p.state)} <span class="na mono" title="${esc(p.name)}">${esc(p.ip || "no IP")}</span>`).join("<br>") || pill(a.state, "error")) },
+    { h: "On this machine", f: a => `<span class="mono">${esc(a.url || "—")}</span> ` +
+        (a.url ? `<a class="btn small" href="${esc(a.url)}" target="_blank" rel="noopener" ${a.reachable ? "" : `aria-disabled="true" title="Not reachable yet: click Start target apps"`}>Open</a>` : "") +
+        `<br>${a.reachable ? pill(`answers (HTTP ${a.http_status})`, "ok") : pill(a.forwarding ? "not answering" : "no port-forward", "error") + (a.error ? `<br><span class="na">${esc(a.error)}</span>` : "")}` },
+    { h: "Requests answered", num: 1, f: a => a.traffic ? `${fmt(a.traffic.answered)}${a.traffic.failed ? ` <span class="na">· ${fmt(a.traffic.failed)} failed</span>` : ""}<br><span class="na">${fmt(a.traffic.runs)} lab Job(s)</span>` : "—" },
+    { h: "Flows to the pod", num: 1, f: a => a.traffic ? `${fmt(a.traffic.flows)} <span class="na">(${fmt(a.traffic.from_lab_jobs)} lab · ${fmt(a.traffic.malicious)} malicious)</span><br><span class="na">last ${a.traffic.last_flow ? ago(a.traffic.last_flow) : "—"}</span>` : "—" },
+  ], t.apps, { emptyTitle: "No target apps configured" });
+  if (st.state === "running") setTimeout(() => { if (S.page === "k8s") renderTargets(); }, 3000);
+}
+$("tgStart").addEventListener("click", async () => {
+  try { await api("/api/targets/start", { method: "POST" }); toast("Starting the target apps…"); } catch (e) { toast(e.message, "bad"); }
+  renderTargets();
+});
 
 /* ---------------- G. Model ---------------- */
 async function pageModel(full) {
@@ -1413,10 +1444,7 @@ $("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", {
   r => `${r.jobs.length} Job(s) created${r.launch_errors.length ? `, ${r.launch_errors.length} refused` : ""}. ${r.notes.join("; ")}. Waiting for the generator logs to confirm traffic…`);
 $("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: false, auto_stop: false }) }),
   r => `${r.jobs.length} Job(s) created (capture not started)`);
-document.querySelectorAll("#winSpan [data-span]").forEach(b => b.addEventListener("click", () => {
-  S.winSpan = +b.dataset.span; document.querySelectorAll("#winSpan [data-span]").forEach(x => x.classList.toggle("on", x === b));
-  refresh(true);
-}));
+
 document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
   S.ovRange = +b.dataset.range; document.querySelectorAll("[data-range]").forEach(x => x.classList.toggle("on", x === b));
   try { localStorage.setItem("ids.ovRange", String(S.ovRange)); } catch (_) { }

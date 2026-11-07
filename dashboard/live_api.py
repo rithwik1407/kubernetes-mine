@@ -74,6 +74,7 @@ class RunRequest(BaseModel):
     targets: list[str] | None = Field(None, max_length=10)
     count: int | None = Field(None, ge=1, le=5000)
     delay: float | None = Field(None, ge=0.0, le=10.0)
+    minutes: float | None = Field(None, ge=0.5, le=60, description="run each Job for this many minutes (time-based run)")
     params: dict[str, str | int | float | None] | None = Field(
         None, description="generator parameters (see /api/trafficlab/scenarios -> params); validated server side")
     auto_capture: bool = True
@@ -477,8 +478,11 @@ def pipeline_run(req: RunRequest):
     if len(scen) * max(1, len(tg)) > 20:
         raise HTTPException(400, "at most 20 Jobs per run")
     try:
+        params = dict(req.params or {})
+        if req.minutes is not None:
+            params["minutes"] = req.minutes
         return pipeline.run_scenarios(scen, tg or None, req.count, req.delay, req.auto_capture, req.auto_stop, CFG,
-                                      params=req.params)
+                                      params=params or None)
     except TrafficLabError as e:
         msg = str(e)
         bad_param = msg.startswith(("unknown generator parameter", "port_start must")) or \
@@ -533,7 +537,7 @@ def deception_engagements(limit: int = Query(100, ge=1, le=1000)):
 
 
 @router.get("/api/deception/not-engaged")
-def deception_not_engaged(minutes: int = Query(15, ge=1, le=1440)):
+def deception_not_engaged(minutes: int = Query(60, ge=1, le=1440)):
     """Detected sources without a decoy, and the controller's reason for each."""
     from live import podinfo
     rows = queries.not_engaged(minutes, CFG)
@@ -550,6 +554,15 @@ def deception_live(limit: int = Query(20, ge=1, le=200)):
     creation time) and per engagement the path attacker pod -> target pod -> decoy pod,
     with the flows/packets captured between the attacker and the decoy pods."""
     return controller().engagement_details(limit)
+
+
+@router.get("/api/deception/recent-pods")
+def deception_recent_pods(minutes: int = Query(60, ge=5, le=1440)):
+    """Every attacker and decoy pod of the last `minutes`, including the ones already gone,
+    in a stable order (first seen, newest on top)."""
+    d = controller().engagement_details(200)
+    return {"minutes": minutes, "pods": queries.recent_pods(d["engagements"], minutes, CFG, d["decoy_pods"]),
+            "categories": [{"key": k, "label": lbl, "why": why} for k, lbl, why in queries.NOT_ENGAGED_REASONS]}
 
 
 @router.get("/api/deception/engagements/{eid}/replay")
@@ -648,6 +661,72 @@ def deception_remove(name: str):
 def kubernetes_status():
     from live.k8s_status import cluster_status
     return cluster_status(CFG)
+
+
+@router.get("/api/targets/access")
+def targets_access(minutes: int = Query(15, ge=1, le=240)):
+    """Target apps on this machine: pod state, local URL (port-forward), whether the URL
+    answers, and how much traffic reached each pod (captured flows, generator requests)."""
+    from live import targetaccess
+    from live.k8s_status import targets_status
+    tg = targets_status(CFG)
+    acc = targetaccess.status(CFG)
+    traffic = queries.target_traffic(tg["apps"], minutes, CFG)
+    by = {a["key"]: a for a in acc["apps"]}
+    apps = [{**a, **by.get(a["key"], {}), "traffic": traffic.get(a["key"])} for a in tg["apps"]]
+    return {"connected": tg["connected"], "error": tg.get("error"), "apps": apps, "minutes": minutes,
+            "port_forward": acc["port_forward"], "all_reachable": acc["all_reachable"],
+            "start": _STATE.get("targets_start")}
+
+
+def _start_targets() -> None:
+    from datetime import datetime, timezone
+    from live import targetaccess
+    _STATE["targets_start"] = {"state": "running", "at": datetime.now(timezone.utc).isoformat()}
+    try:
+        res = targetaccess.start(CFG)
+        _STATE["targets_start"] = {"state": "done", "at": datetime.now(timezone.utc).isoformat(), "steps": res["steps"],
+                                   "urls": {a["key"]: a["url"] for a in res["apps"]}}
+    except Exception as e:  # noqa: BLE001
+        log.warning("starting target apps failed: %s", e)
+        _STATE["targets_start"] = {"state": "failed", "at": datetime.now(timezone.utc).isoformat(), "error": str(e)[:300]}
+
+
+@router.post("/api/targets/start", status_code=202)
+def targets_start():
+    """Deploy missing target apps, wait for Ready pods, start the localhost port-forwards
+    (in the background; poll GET /api/targets/access)."""
+    if (_STATE.get("targets_start") or {}).get("state") == "running":
+        raise HTTPException(409, "the target apps are already being started")
+    threading.Thread(target=_start_targets, name="targets-start", daemon=True).start()
+    return {"state": "running"}
+
+
+def _autostart_loop() -> None:
+    """Bring the target apps up when the dashboard starts; if the cluster is not up yet
+    (K3s still starting), try again every 30 s for 15 minutes."""
+    import time as _time
+    for _ in range(30):
+        _start_targets()
+        if (_STATE.get("targets_start") or {}).get("state") == "done":
+            return
+        _time.sleep(30)
+
+
+@router.on_event("startup")
+def _autostart_targets() -> None:
+    # the hook can be registered on both the router and the app: start the loop only once
+    if _STATE.get("targets_autostart"):
+        return
+    _STATE["targets_autostart"] = True
+    if (CFG.get("target_apps") or {}).get("start_on_launch"):
+        threading.Thread(target=_autostart_loop, name="targets-autostart", daemon=True).start()
+
+
+@router.on_event("shutdown")
+def _stop_targets() -> None:
+    from live import targetaccess
+    targetaccess.stop_forwards()
 
 
 # --- system ---------------------------------------------------------------------------

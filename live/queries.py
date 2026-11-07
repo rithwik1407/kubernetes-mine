@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -346,20 +347,138 @@ def threat_counter(cfg=None) -> dict[str, Any]:
     return {"run": live, "total": {"malicious": sum(tot.values()), "by_class": tot}}
 
 
-def not_engaged(minutes: int = 15, cfg=None) -> list[dict[str, Any]]:
-    """Sources with recent detections that are NOT engaged, with the controller's last reason
-    (below the severity/flow threshold, cooldown, decoy limit, allowlisted, decoy pod ...)."""
+NOT_ENGAGED_REASONS = [
+    # (category, label, explanation): matched in order against the controller's reason text
+    ("disabled", "Deception off", "automatic deception was disabled, so nothing was acted on"),
+    ("allowlisted", "Control plane / allowlisted", "the source is the API server, kubelet, node bridge or kube-system, which is never acted on"),
+    ("decoy", "Decoy traffic", "the source is a decoy pod itself"),
+    ("reply", "Reply traffic", "the source only answers a lab attack pod (a target replying), so it is not an attacker"),
+    ("cooldown", "Cooldown", "the source was released recently and may not re-engage until the cooldown ends"),
+    ("limit", "Decoy limit", "the maximum number of active decoys was reached and no running decoy could be reused"),
+    ("flows", "Too few flows", "fewer flows than the class needs within its time window (one flow never triggers)"),
+    ("severity", "Below severity", "the flows' confidence is below the severity chosen under 'Engage deception at'"),
+    ("other", "Not actionable", "the controller recorded it without acting; see the full reason"),
+]
+
+
+def _not_engaged_category(action: str | None, reason: str | None) -> str:
+    r = (reason or "").lower()
+    if "disabled" in r:
+        return "disabled"
+    if "allowlist" in r or "control-plane" in r or "control plane" in r or "kube-system" in r:
+        return "allowlisted"
+    if "decoy pod" in r or "is a decoy" in r:
+        return "decoy"
+    if "reply traffic" in r or "answering traffic-lab pod" in r:
+        return "reply"
+    if "cooldown" in r or action == "suppress_cooldown":
+        return "cooldown"
+    if "active decoys reached" in r or action == "suppress_limit":
+        return "limit"
+    m = re.search(r"(\d+) flow\(s\).*?mean confidence ([\d.]+); below policy \((\d+) flows.*?mean >= ([\d.]+)", r)
+    if m:
+        n, mean, need, need_mean = int(m.group(1)), float(m.group(2)), int(m.group(3)), float(m.group(4))
+        return "flows" if n < need else "severity" if mean < need_mean else "other"
+    if "below policy" in r:
+        return "flows"
+    return "other"
+
+
+def not_engaged(minutes: int = 60, cfg=None) -> list[dict[str, Any]]:
+    """Every source the model or the behaviour rules flagged in the last `minutes` that was
+    not engaged when it was flagged: one row per source, ordered by when it was FIRST seen,
+    so a refresh never reorders or drops rows; a source that was engaged later stays listed
+    with that engagement. Each row carries the controller's latest reason and its category."""
     cfg = cfg or load_config()
     since = (datetime.now(timezone.utc) - timedelta(minutes=int(minutes))).isoformat()
     with db.connect(db.db_path(cfg)) as c:
-        rows = [dict(r) for r in c.execute(
-            "SELECT d.* FROM decisions d JOIN (SELECT src_ip, MAX(id) mid FROM decisions WHERE created_at >= ? "
-            "AND src_ip IS NOT NULL AND trigger IN ('ml', 'behavior') GROUP BY src_ip) m ON d.id = m.mid "
-            "WHERE d.src_ip NOT IN (SELECT src_ip FROM engagements WHERE state = 'active') ORDER BY d.id DESC",
-            (since,))]
-    keep = ("id", "created_at", "src_ip", "trigger", "attack_class", "assessment", "max_confidence",
-            "evidence_count", "action", "result", "reason")
-    return [{k: r.get(k) for k in keep} for r in rows if r.get("action") not in ("engage", "redirect")]
+        agg = {r["src_ip"]: dict(r) for r in c.execute(
+            "SELECT src_ip, MIN(created_at) first_seen, MAX(created_at) last_seen, COUNT(*) decisions, "
+            "MAX(evidence_count) max_flows, MAX(max_confidence) max_conf, MAX(id) last_id FROM decisions "
+            "WHERE created_at >= ? AND src_ip IS NOT NULL AND trigger IN ('ml', 'behavior') "
+            "AND action NOT IN ('engage', 'redirect', 'deploy', 'refresh', 'scale', 'reuse') GROUP BY src_ip", (since,))}
+        if not agg:
+            return []
+        ph = ",".join("?" * len(agg))
+        last = {r["id"]: dict(r) for r in c.execute(
+            f"SELECT * FROM decisions WHERE id IN ({ph})", [a["last_id"] for a in agg.values()])}
+        engs = {}
+        for r in c.execute(f"SELECT id, src_ip, state, started_at FROM engagements WHERE src_ip IN ({ph}) "
+                           "AND (state = 'active' OR started_at >= ?) ORDER BY id", (*agg, since)):
+            engs[r["src_ip"]] = dict(r)
+    labels = {k: (lbl, why) for k, lbl, why in NOT_ENGAGED_REASONS}
+    out = []
+    for ip, a in agg.items():
+        d = last[a["last_id"]]
+        cat = _not_engaged_category(d.get("action"), d.get("reason"))
+        e = engs.get(ip)
+        out.append({"src_ip": ip, "first_seen": a["first_seen"], "last_seen": a["last_seen"], "created_at": a["last_seen"],
+                    "decisions": a["decisions"], "max_flows": a["max_flows"], "max_confidence": a["max_conf"],
+                    "trigger": d.get("trigger"), "attack_class": d.get("attack_class"), "assessment": d.get("assessment"),
+                    "evidence_count": d.get("evidence_count"), "action": d.get("action"), "reason": d.get("reason"),
+                    "category": cat, "category_label": labels[cat][0], "category_why": labels[cat][1],
+                    "engaged_later": ({"id": e["id"], "state": e["state"], "started_at": e["started_at"]}
+                                      if e and e["started_at"] >= a["first_seen"][:19] else None),
+                    "engaged_now": bool(e and e["state"] == "active")})
+    out.sort(key=lambda r: (r["first_seen"], r["src_ip"]), reverse=True)
+    return out
+
+
+def recent_pods(engagements: list[dict[str, Any]], minutes: int = 60, cfg=None,
+                live_decoy_pods: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+    """Every attacker and decoy pod of the last `minutes`, including pods that are gone:
+    attackers from the engagements, decoy pods from what the controller recorded while they
+    ran (plus what Kubernetes reports now). Ordered by when each pod was first seen, so new
+    pods are added on top and nothing moves or disappears on a refresh."""
+    cfg = cfg or load_config()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=int(minutes))).isoformat()
+    live = {p["pod"]: p for p in live_decoy_pods or []}
+    rows: dict[str, dict[str, Any]] = {}
+    for e in engagements:
+        a = e.get("attacker") or {}
+        if not a.get("pod") or (e["started_at"] < since and e.get("state") != "active"):
+            continue
+        k = f"attacker/{a.get('namespace')}/{a['pod']}"
+        r = rows.setdefault(k, {"role": "attacker", "pod": a["pod"], "namespace": a.get("namespace"), "ip": e["src_ip"],
+                                "node": a.get("node"), "first_seen": e["started_at"], "engagements": [],
+                                "scenario": a.get("scenario"), "state": None})
+        r["engagements"].append(e["id"])
+        r["first_seen"] = min(r["first_seen"], e["started_at"])
+        rd = e.get("redirect") or {}
+        r["state"] = ("quarantined, redirected" if e.get("state") == "active" and rd.get("applied")
+                      else "engaged" if e.get("state") == "active" else r["state"] or "released")
+    with db.connect(db.db_path(cfg)) as c:
+        decs = [dict(x) for x in c.execute(
+            "SELECT id, name, node, status, created_at, removed_at, pods FROM decoys "
+            "WHERE created_at >= ? OR removed_at IS NULL OR removed_at >= ? ORDER BY id", (since, since))]
+    eng_by_decoy: dict[str, list[tuple[int, str, str | None]]] = {}
+    for e in engagements:
+        for n in e.get("decoys") or []:
+            eng_by_decoy.setdefault(n, []).append((e["id"], e["started_at"], e.get("released_at")))
+
+    def served(name: str | None, born: str | None, gone: str | None) -> list[int]:
+        """Engagements that used this decoy name while this pod existed (a name is reused)."""
+        b, g = str(born or "")[:19], str(gone or "9999")[:19]
+        return sorted({i for i, st, rel in eng_by_decoy.get(name, []) if str(st)[:19] <= g and str(rel or "9999")[:19] >= b})
+    for d in decs:
+        for p in json.loads(d.get("pods") or "[]"):
+            lp = live.get(p["pod"])
+            state = ("Terminating" if lp and lp.get("deleting") else "Running" if lp and lp.get("ready")
+                     else (lp.get("phase") or "Pending") if lp else "removed")
+            rows[f"decoy/{p['pod']}"] = {"role": "decoy", "pod": p["pod"], "namespace": cfg["deception"]["namespace"],
+                                         "ip": (lp or {}).get("ip") or p.get("ip"), "node": (lp or {}).get("node") or p.get("node"),
+                                         "first_seen": p.get("created") or p.get("first_seen") or d["created_at"],
+                                         "decoy": d["name"],
+                                         "engagements": served(d["name"], p.get("created") or p.get("first_seen"),
+                                                               None if lp else p.get("last_seen")),
+                                         "state": state, "removed_at": d.get("removed_at") if state == "removed" else None}
+    for name, lp in live.items():                 # a pod the controller has not recorded yet
+        if f"decoy/{name}" not in rows:
+            rows[f"decoy/{name}"] = {"role": "decoy", "pod": name, "namespace": lp.get("namespace"), "ip": lp.get("ip"),
+                                     "node": lp.get("node"), "first_seen": lp.get("created") or "", "decoy": lp.get("decoy"),
+                                     "engagements": served(lp.get("decoy"), lp.get("created"), None),
+                                     "state": "Terminating" if lp.get("deleting") else "Running" if lp.get("ready") else lp.get("phase") or "Pending"}
+    return sorted(rows.values(), key=lambda r: (str(r["first_seen"]), r["pod"]), reverse=True)
 
 
 def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
@@ -596,3 +715,34 @@ def engagement_replay(eng: dict[str, Any], cfg=None, frames: int = 24, pods: dic
             "nodes": nodes, "events": events, "flows": len(rows),
             "to_decoy": sum(e["flows"] for e in edges.values() if e["redirect"]),
             "to_target": sum(e["flows"] for e in edges.values() if not e["redirect"])}
+
+
+def target_traffic(apps: list[dict[str, Any]], minutes: int = 15, cfg=None) -> dict[str, dict[str, Any]]:
+    """Per target app: captured flows to/from its pod(s) in the last `minutes` (all sources,
+    from Traffic-lab Jobs, malicious), and the requests the lab generators got answered by it
+    in the runs of that period (from the generator logs). `apps` = targets_status()["apps"]."""
+    cfg = cfg or load_config()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=int(minutes))).isoformat()
+    out: dict[str, dict[str, Any]] = {}
+    with db.connect(db.db_path(cfg)) as c:
+        row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
+        runs = [r for r in (json.loads(row[0]) if row else []) if (r.get("started_at") or "") >= since]
+        for a in apps:
+            ips = [p["ip"] for p in a.get("pods") or [] if p.get("ip")]
+            res = {"flows": 0, "from_lab_jobs": 0, "malicious": 0, "last_flow": None, "answered": 0, "failed": 0, "runs": 0}
+            if ips:
+                ph = ",".join("?" * len(ips))
+                r = c.execute(
+                    f"SELECT COUNT(*) n, SUM(lab_job IS NOT NULL) lab, SUM(is_malicious) mal, MAX(detected_at) last "
+                    f"FROM detections WHERE detected_at >= ? AND simulated = 0 AND (dst_ip IN ({ph}) OR src_ip IN ({ph}))",
+                    (since, *ips, *ips)).fetchone()
+                res.update(flows=r["n"] or 0, from_lab_jobs=r["lab"] or 0, malicious=r["mal"] or 0, last_flow=r["last"])
+            for run in runs:
+                for j in run.get("jobs", []):
+                    label = (j.get("target_label") or j.get("target") or "").split(".")[0].split(":")[0]
+                    if label == a["key"] and "answered" in j:
+                        res["answered"] += j.get("answered") or 0
+                        res["failed"] += j.get("failed") or 0
+                        res["runs"] += 1
+            out[a["key"]] = res
+    return out

@@ -406,9 +406,12 @@ def test_threat_counter_shows_current_run_then_clears(cfg):
 def test_generator_params_are_validated_and_become_env(cfg):
     from live import trafficlab
     job = trafficlab.build_job("brute_force", cfg, "grafana.target-apps.svc.cluster.local:3000",
-                               params={"concurrency": 4, "duration_s": 60, "target_port": 8080, "login_path": "/api/login"})
+                               params={"concurrency": 4, "minutes": 3, "target_port": 8080, "login_path": "/api/login"})
     env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
-    assert env["CONCURRENCY"] == "4" and env["TIME_BUDGET_S"] == "60" and env["LOGIN_PATH"] == "/api/login"
+    assert env["CONCURRENCY"] == "4" and env["RUN_SECONDS"] == "180" and env["TIME_BUDGET_S"] == "180"
+    assert env["LOGIN_PATH"] == "/api/login"
+    # the Job's time limit follows the chosen minutes (+ start margin), so it never fails on it
+    assert job["spec"]["activeDeadlineSeconds"] == 180 + cfg["traffic_lab"]["job_start_margin_seconds"]
     assert env["TARGET"] == "grafana.target-apps.svc.cluster.local:8080"
     assert [e["name"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]].count("LOGIN_PATH") == 1
     for bad in ({"concurrency": 99}, {"login_path": "/x; rm -rf /"}, {"payload_set": "evil"}, {"nope": 1},

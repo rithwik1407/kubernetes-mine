@@ -88,6 +88,18 @@ cicflowmeter:
   java: java
   timeout_seconds: 300
 
+# Target apps (Node-RED, Grafana, InfluxDB) on this machine (live/targetaccess.py). Their
+# Services are ClusterIP, so the dashboard runs one `kubectl port-forward` per app, bound to
+# 127.0.0.1, and restarts it if it stops. start_on_launch: when the dashboard starts, deploy
+# missing apps, wait until they are Ready and start the forwards (in the background).
+target_apps:
+  namespace: target-apps
+  manifest: deploy/target-apps/target-apps.yaml
+  port_forward: true
+  start_on_launch: true
+  ready_timeout_seconds: 180
+  local_ports: {nodered: 1880, grafana: 3000, influxdb: 8086}
+
 # Traffic lab: each named scenario is one Kubernetes Job (deploy/traffic-lab).
 # "detectable" marks the attacks the CIC model was trained to recognise.
 traffic_lab:
@@ -96,7 +108,8 @@ traffic_lab:
     nodered:  {host: nodered.target-apps.svc.cluster.local,  port: 1880}
     grafana:  {host: grafana.target-apps.svc.cluster.local,  port: 3000}
     influxdb: {host: influxdb.target-apps.svc.cluster.local, port: 8086}
-  job_deadline_seconds: 300
+  job_deadline_seconds: 300          # count-based runs; a "Run for N minutes" Job gets N min + job_start_margin_seconds
+  job_start_margin_seconds: 120
   # default_target is a key of `targets`; env is passed to the generator pod.
   # expect_class is what the scenario is meant to resemble, not a promise: the
   # dashboard compares it with what the model actually predicted for the run.

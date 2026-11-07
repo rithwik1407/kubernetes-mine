@@ -313,3 +313,39 @@ def test_orphan_decoys_are_removed_after_the_grace_period(cfg):
     with db.connect(DBP[0]) as c:
         reason = c.execute("SELECT reason FROM decisions WHERE action = 'remove'").fetchone()[0]
     assert "left over" in reason
+
+
+def test_second_trigger_on_an_engaged_source_adds_no_second_decoy(cfg):
+    """Engagement #60 in the sandbox got two decoys: PortScan evidence engaged the source,
+    then a second class (another trigger) planned its own profile. An engaged source keeps
+    the one decoy it has; the second trigger only refreshes it."""
+    cfg["deception"]["cooldown_seconds"] = 0
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    _flows("PortScan", 40, 0.98)
+    ctl.run_cycle()
+    _flows("BruteForce", 40, 0.98, port=3000)
+    ctl.run_cycle()
+    assert mgr.deployed == {"decoy-web-portal": 1}
+    engs = ctl.engagements()
+    assert len(engs) == 1 and engs[0]["decoys"] == ["decoy-web-portal"]
+
+
+def test_ml_and_behaviour_triggers_in_one_cycle_plan_one_decoy(cfg):
+    """Sandbox engagements #61/#62: the ML trigger and a flow-burst trigger for the same
+    source arrived in the same cycle, before the first decoy was linked to the engagement."""
+    from live import db as _db
+    ctl = MapeKController(cfg, manager=FakeManager())
+    with _db.connect(DBP[0]) as c:
+        eid = _db.insert_row(c, "engagements", src_ip="10.42.0.9", state="active", started_at=_now(),
+                             last_evidence_at=_now(), node="vm", decoys="[]", redirect="{}") \
+            if "engagements" in [r[0] for r in c.execute("SELECT name FROM sqlite_master")] else None
+        base = {"actionable": True, "assessment": "high", "src_ip": "10.42.0.9", "engagement_id": eid,
+                "target_node": "vm", "evidence_count": 12, "reason": "r"}
+        acts = ctl.plan(c, [{**base, "trigger": "ml", "attack_class": "BruteForce"},
+                            {**base, "trigger": "behavior", "attack_class": "Reconnaissance (flow burst)",
+                             "target_port": 3000}])
+    deploys = [a["name"] for a in acts if a["action"] == "deploy"]
+    assert len(deploys) == 1
+    assert [a["action"] for a in acts if a["trigger"] == "behavior"] == ["refresh"]

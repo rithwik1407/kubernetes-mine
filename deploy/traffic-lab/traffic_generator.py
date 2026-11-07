@@ -61,12 +61,16 @@ PAYLOAD_SET = os.environ.get("PAYLOAD_SET", "mixed")   # web_attack: mixed | sql
 # slower than expected (targets not answering, every connect waiting for its timeout)
 # is killed by Kubernetes, its pod is deleted and the only trace is "DeadlineExceeded".
 TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_S", "0"))   # 0 = unlimited
+# Time-based run ("Run for N minutes"): the scenario is repeated pass after pass at its
+# normal rate until RUN_SECONDS have passed. 0 = one pass (count / port range / conns).
+RUN_SECONDS = float(os.environ.get("RUN_SECONDS", "0") or 0)
 _T0 = time.monotonic()
 # Wall-clock end set when the Job was created (activeDeadlineSeconds minus a margin), so a
 # pod that started late (image pull, busy node) still stops before Kubernetes kills it.
 JOB_DEADLINE_EPOCH = float(os.environ.get("JOB_DEADLINE_EPOCH", "0") or 0)
 _COUNTS = {"ok": 0, "errors": 0}
-_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected"}
+_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected",
+                "run_complete"}
 # Deception redirect. The pod's own annotations are mounted here through the downward
 # API (Kubernetes refreshes the file within seconds of a change). When the deception
 # controller has engaged this pod, it sets ids-deception/redirect-to=<decoy host:port>
@@ -122,7 +126,8 @@ def out_of_time() -> bool:
         return False
     if not _COUNTS.get("budget_logged"):
         _COUNTS["budget_logged"] = 1
-        emit(action="budget_exhausted", note=(f"stopped after {TIME_BUDGET_S:.0f}s time budget" if over_budget else
+        emit(action="budget_exhausted", note=((f"run time of {RUN_SECONDS / 60:g} min reached" if RUN_SECONDS else f"stopped after {TIME_BUDGET_S:.0f}s time budget")
+                                               if over_budget else
                                                "stopped before the Job's deadline (the pod started late)"),
              answered=_COUNTS["ok"], failed=_COUNTS["errors"])
     return True
@@ -410,7 +415,16 @@ def main() -> None:
     if runner is None:
         sys.exit(f"unknown MODE {MODE!r}; one of {sorted(RUNNERS)}")
     try:
-        runner()
+        if RUN_SECONDS > 0:
+            passes = 0
+            while not out_of_time():
+                passes += 1
+                runner()
+                time.sleep(1)                  # never spin when a pass ends at once (target down)
+            emit(action="run_complete", scenario=MODE, passes=passes, seconds=round(time.monotonic() - _T0),
+                 answered=_COUNTS["ok"], failed=_COUNTS["errors"])
+        else:
+            runner()
     except KeyboardInterrupt:
         emit(action="interrupted", scenario=MODE)
         return

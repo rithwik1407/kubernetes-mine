@@ -22,6 +22,7 @@ def client(tmp_path_factory):
                         local_model_dir=str(tmp / "no-local-model"))
     cfg["capture"].update(state_file=str(tmp / "state.json"), pid_file=str(tmp / "capture.pid"))
     cfg["deception"]["kubeconfig"] = str(tmp / "no.kubeconfig")
+    cfg["target_apps"]["start_on_launch"] = False
     (tmp / "live.yaml").write_text(yaml.safe_dump(cfg))
     mp = pytest.MonkeyPatch()
     mp.setenv("IDS_CONFIG", str(tmp / "live.yaml"))

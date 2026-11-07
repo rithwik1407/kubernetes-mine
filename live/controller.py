@@ -569,6 +569,7 @@ class MapeKController:
         last_deploy = parse(c.execute("SELECT MAX(created_at) FROM decoys").fetchone()[0])
         actions: list[dict[str, Any]] = []
         planned: set[str] = set()
+        by_eng: dict[int, list[str]] = {}          # decoys planned for each engagement this cycle
         for a in assessments:
             if not a["actionable"]:
                 actions.append({**a, "action": "await_evidence" if a["assessment"] == "medium" else "monitor",
@@ -577,6 +578,25 @@ class MapeKController:
             # one decoy per engagement by default: the redirect only ever uses the first
             # (preferred) profile, so a second one was an idle pod
             n_dec = int(self.d.get("decoys_per_engagement", 1) or 0)
+            # a source that is already engaged keeps its decoy: a second trigger (ML evidence,
+            # then a behaviour rule such as a flow burst to another port) must not plan another
+            # profile for it, only extend the decoys it already has
+            eid = a.get("engagement_id")
+            if eid and n_dec > 0:
+                row = c.execute("SELECT decoys FROM engagements WHERE id = ?", (eid,)).fetchone()
+                have = [n for n in (json.loads(row["decoys"] or "[]") if row else []) if n in decoys]
+                # the ML trigger and a behaviour trigger can both fire in the same cycle,
+                # before the first decoy is linked to the engagement
+                have += [n for n in by_eng.get(eid, []) if n not in have]
+                if len(have) >= n_dec:
+                    for name in have[:n_dec]:
+                        prof = (decoys.get(name) or {}).get("profile") or next(
+                            (x["profile"] for x in actions if x.get("name") == name), None)
+                        actions.append({**a, "profile": prof, "name": name, "node": a.get("target_node"),
+                                        "action": "refresh",
+                                        "reason": a["reason"] + f"; engagement #{eid} already has {name}, no second decoy"})
+                        planned.add(name)
+                    continue
             profiles = self._profiles_for(c, a)
             for profile in (profiles[:n_dec] if n_dec > 0 else profiles):
                 name = decoy_name(profile, a.get("target_node"))
@@ -610,6 +630,8 @@ class MapeKController:
                                     "reason": a["reason"] + f"; policy {a['attack_class']} -> {profile}"})
                     active_count += 1
                 planned.add(name)
+                if eid:
+                    by_eng.setdefault(eid, []).append(name)
             self._ensure_a_decoy(c, a, actions, decoys)
         return actions
 
@@ -759,11 +781,32 @@ class MapeKController:
             pods = mgr.decoy_pods()
         except Exception:  # noqa: BLE001
             return
+        now = iso(now_utc())
         for r in rows:
             ips = set(json.loads(r.get("pod_ips") or "[]"))
             new = ips | {p["ip"] for p in pods if p.get("decoy") == r["name"] and p.get("ip")}
             if new != ips:
                 db.update_row(c, "decoys", r["id"], pod_ips=json.dumps(sorted(new)))
+            # every pod the decoy ever had (name, node, IP, first/last seen), for the
+            # Deception page's recent-pods list after the pods are gone
+            seen = {x["pod"]: x for x in json.loads(r.get("pods") or "[]")}
+            changed = False
+            for p in pods:
+                if p.get("decoy") != r["name"]:
+                    continue
+                x = seen.get(p["pod"])
+                if x is None:
+                    seen[p["pod"]] = {"pod": p["pod"], "ip": p.get("ip"), "node": p.get("node"),
+                                      "created": p.get("created"), "first_seen": now, "last_seen": now}
+                    changed = True
+                elif p.get("ip") and x.get("ip") != p["ip"] or x.get("node") != p.get("node"):
+                    x.update(ip=p.get("ip") or x.get("ip"), node=p.get("node") or x.get("node"), last_seen=now)
+                    changed = True
+                elif now[:16] != (x.get("last_seen") or "")[:16]:      # refresh last_seen once a minute
+                    x["last_seen"] = now
+                    changed = True
+            if changed:
+                db.update_row(c, "decoys", r["id"], pods=json.dumps(list(seen.values())))
 
     def _remove_orphans(self, c, cycle_id: int, mgr, live: dict[str, dict], tracked: set[str],
                         now: datetime, out: dict[str, Any]) -> None:
