@@ -123,7 +123,7 @@ def live_detections(limit: int = Query(200, ge=1, le=5000), offset: int = Query(
                     malicious: bool | None = None,
                     lab_scenario: str | None = Query(None, max_length=64, pattern=r"^[a-z_]+$")):
     """lab_scenario: a Traffic-lab scenario (port_scan, ...) or "any" for flows of any lab pod."""
-    return queries.detections(limit, offset, source, predicted_class, src_ip, malicious, CFG, lab_scenario)
+    return _with_nodes(queries.detections(limit, offset, source, predicted_class, src_ip, malicious, CFG, lab_scenario))
 
 
 @router.get("/api/live/stats")
@@ -149,7 +149,25 @@ def live_activity(minutes: int = Query(15, ge=1, le=180), bucket: int = Query(30
 
 @router.get("/api/live/bursts")
 def live_bursts(limit: int = Query(200, ge=1, le=5000)):
-    return queries.behavior_alerts(limit, CFG)
+    return _with_nodes(queries.behavior_alerts(limit, CFG))
+
+
+def _with_nodes(rows: list[dict]) -> list[dict]:
+    """Add src_node / dst_node (and the pod names) for lab pods, from the live pod map."""
+    from live import podinfo
+    pods = podinfo.get(CFG)
+    for r in rows:
+        for end in ("src", "dst"):
+            hit = pods.get(str(r.get(f"{end}_ip")))
+            r[f"{end}_node"] = hit["node"] if hit else None
+            r[f"{end}_pod"] = f"{hit['namespace']}/{hit['pod']}" if hit else None
+    return rows
+
+
+@router.get("/api/live/threat-counter")
+def live_threat_counter():
+    """Malicious flows of the Traffic-lab run in progress (null when none) and the total per class."""
+    return queries.threat_counter(CFG)
 
 
 @router.get("/api/live/bursts/count")
@@ -462,6 +480,14 @@ def deception_detection_policy_set(req: PolicyUpdate):
 def deception_engagements(limit: int = Query(100, ge=1, le=1000)):
     """Engaged sources: trigger, redirect state, linked decoys, release."""
     return controller().engagements(limit)
+
+
+@router.get("/api/deception/live")
+def deception_live(limit: int = Query(20, ge=1, le=200)):
+    """What deception is doing right now: decoy pods (name, namespace, node, pod IP, phase,
+    creation time) and per engagement the path attacker pod -> target pod -> decoy pod,
+    with the flows/packets captured between the attacker and the decoy pods."""
+    return controller().engagement_details(limit)
 
 
 @router.get("/api/live/allowlist")

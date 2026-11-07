@@ -309,3 +309,38 @@ def policy(cfg=None) -> dict[str, Any]:
     d = (cfg or load_config())["deception"]
     return {k: d[k] for k in ("attack_policy", "behavior_policy", "profiles", "thresholds", "scale_on_repeat",
                               "max_active_decoys", "max_replicas", "decoy_ttl_seconds", "act_on_sources", "engagement")}
+
+
+ACTIVE_RUN_STATES = ("waiting for Jobs", "draining")
+
+
+def threat_counter(cfg=None) -> dict[str, Any]:
+    """Sidebar counter. `run`: malicious flows of the Traffic-lab run in progress (None when
+    no run is in progress, so the live number clears when a run finishes). `total`: every
+    malicious flow so far, per class. Allowlisted and simulated flows never count."""
+    cfg = cfg or load_config()
+    with db.connect(db.db_path(cfg)) as c:
+        row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
+        runs = json.loads(row[0]) if row else []
+        run = runs[0] if runs else None
+        active = False
+        if run:
+            st = (run.get("auto_stop") or {}).get("state")
+            if st in ACTIVE_RUN_STATES:
+                active = True
+            elif st in (None, "off") and not run.get("finished_at"):
+                age = (datetime.now(timezone.utc) - datetime.fromisoformat(run["started_at"])).total_seconds()
+                active = age < float(cfg["traffic_lab"].get("job_deadline_seconds", 300))
+        live = None
+        if active:
+            where, params = "is_malicious = 1 AND simulated = 0 AND detected_at >= ?", [run["started_at"]]
+            if run.get("session_id"):
+                where += " AND session_id = ?"
+                params.append(run["session_id"])
+            by = {r[0]: r[1] for r in c.execute(
+                f"SELECT predicted_class, COUNT(*) FROM detections WHERE {where} GROUP BY predicted_class", params)}
+            live = {"run_id": run["id"], "scenario": run.get("scenario"), "session_id": run.get("session_id"),
+                    "started_at": run["started_at"], "malicious": sum(by.values()), "by_class": by}
+        tot = {r[0]: r[1] for r in c.execute(
+            "SELECT predicted_class, COUNT(*) FROM detections WHERE is_malicious = 1 AND simulated = 0 GROUP BY predicted_class")}
+    return {"run": live, "total": {"malicious": sum(tot.values()), "by_class": tot}}

@@ -50,6 +50,11 @@ nav svg { width: 17px; height: 17px; flex: none; stroke: currentColor; fill: non
 nav .badge { margin-left: auto; font-size: 11px; background: var(--critical); color: #fff; border-radius: 999px; padding: 0 7px; line-height: 18px; }
 .side-foot { margin-top: auto; border-top: 1px solid var(--border); padding: 12px 8px 0; font-size: 12px; color: var(--muted); }
 .side-foot .row { display: flex; align-items: center; gap: 8px; margin: 4px 0; color: var(--text-2); }
+.side-threats { margin-bottom: 12px; }
+.side-threats .run { border: 1px solid var(--border-2); border-radius: 8px; padding: 6px 8px; margin-bottom: 8px; color: var(--text-2); }
+.side-threats .run b { font-size: 18px; color: var(--text); font-variant-numeric: tabular-nums; }
+.side-threats .cats { display: grid; grid-template-columns: 1fr auto; gap: 1px 8px; margin-top: 3px; font-variant-numeric: tabular-nums; }
+.side-threats .cats span:nth-child(even) { text-align: right; color: var(--text-2); }
 
 /* main */
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
@@ -206,6 +211,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
     <button data-page="scorer"><svg viewBox="0 0 24 24"><path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/><path d="M14 3v6h6M8 13h8M8 17h5"/></svg>CSV scorer</button>
   </nav>
   <div class="side-foot">
+    <div id="sideThreats" class="side-threats" aria-live="polite"></div>
     <div style="margin-bottom:4px">Component health</div>
     <div id="sideHealth"><div class="row"><span class="dot"></span>checking…</div></div>
   </div>
@@ -264,7 +270,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   </section>
 
   <!-- C. THREATS -->
-  <section class="page" id="p-threats" data-title="Threat detection" data-sub="Multi-class predictions from the CIC-IDS2017 model, plus behaviour rules for reconnaissance">
+  <section class="page" id="p-threats" data-title="Threat detection" data-sub="Multi-class predictions from the live model, plus behaviour rules for reconnaissance">
     <div class="grid two">
       <div class="card"><h2>Classes this model supports</h2><p class="hint">Only classes the trained model can output. Reliability comes from its held-out test set.</p><div id="thClasses"><div class="loading">Loading model…</div></div></div>
       <div class="card"><div class="card-head"><div><h2>Labelled check</h2><p class="hint">Score labelled held-out flows (never used in training) with the live model and compare to their labels.</p></div><button class="btn" id="evalBtn">Run labelled check</button></div><div id="evalOut"><div class="empty"><b>Not run yet</b>Press the button to measure accuracy on labelled traffic now.</div></div></div>
@@ -328,6 +334,12 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
     <div class="card"><div class="card-head"><div><h2>Controller</h2><p class="hint" id="decHint">—</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="decEnable">Enable automatic deception</button><button class="btn" id="decDisable">Disable</button><button class="btn" id="decCycle">Run cycle now</button></div></div>
       <div class="grid kpis" id="decKpis"></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Live deception</h2><p class="hint">Each engaged attacker: the pod its attack hits, the decoy placed on that pod's node, and the traffic that has reached the decoy. Decoy flows are counted from captured flows between the attacker and the decoy pod IPs; requests from the decoy's own log.</p></div></div>
+      <div id="decLive"><div class="loading">Loading…</div></div></div>
+    <div class="grid two" style="margin-top:14px">
+      <div class="card"><h2>Decoy pods</h2><p class="hint">Live from Kubernetes (namespace ids-deception)</p><div id="decPods"></div></div>
+      <div class="card"><h2>Check it yourself</h2><p class="hint">Run these on the machine with your kubeconfig</p><div id="decCmds"></div></div>
+    </div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detection thresholds</h2><p class="hint">When ML detections trigger a decoy + redirect: per attack class, at least <b>N flows</b> from one source, each ≥ <b>min confidence</b>, within <b>T seconds</b>, with <b>mean confidence</b> ≥ X. A single flow never triggers. Control-plane traffic (API server, kubelet, kube-system) is never acted on.</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" id="polSave">Save thresholds</button><button class="btn small" id="polReset">Reset to defaults</button></div></div>
       <form id="polForm" novalidate><div id="polTable"><div class="loading">Loading…</div></div></form>
@@ -445,6 +457,32 @@ const pill = (label, state) => `<span class="pill ${stateCls(state ?? label)}"><
 function toast(msg, kind = "") { const t = document.createElement("div"); t.className = "toast " + kind; t.textContent = msg; $("toasts").appendChild(t); setTimeout(() => t.remove(), kind === "bad" ? 9000 : 4500); }
 function errBox(e) { return `<div class="errbox">${esc(e.message || e)}</div>`; }
 function empty(title, body = "") { return `<div class="empty"><b>${esc(title)}</b>${esc(body)}</div>`; }
+/* In-place rendering. Auto-refresh used to replace whole panels every couple of seconds,
+   which reset the scroll position of tables (and of the page when a panel briefly shrank).
+   `el.html = markup` patches the existing DOM instead: unchanged rows are left alone, changed
+   cells/attributes are updated, and only real additions/removals touch the tree, so scroll
+   positions, focus and open <details> survive a refresh. */
+function morphChildren(a, b) {
+  const an = Array.from(a.childNodes), bn = Array.from(b.childNodes);
+  bn.forEach((y, i) => { if (i < an.length) morphNode(an[i], y); else a.appendChild(y); });
+  for (let i = an.length - 1; i >= bn.length; i--) an[i].remove();
+}
+function morphNode(x, y) {
+  if (x.nodeType !== y.nodeType || x.nodeName !== y.nodeName) { x.replaceWith(y); return; }
+  if (x.nodeType !== 1) { if (x.nodeValue !== y.nodeValue) x.nodeValue = y.nodeValue; return; }
+  if (x.isEqualNode(y)) return;
+  for (const at of Array.from(x.attributes)) if (!y.hasAttribute(at.name) && at.name !== "open") x.removeAttribute(at.name);
+  for (const at of Array.from(y.attributes)) if (x.getAttribute(at.name) !== at.value) x.setAttribute(at.name, at.value);
+  if ((x.tagName === "INPUT" || x.tagName === "SELECT" || x.tagName === "TEXTAREA") && x === document.activeElement) return;
+  morphChildren(x, y);
+}
+Object.defineProperty(HTMLElement.prototype, "html", {
+  set(markup) {
+    const t = document.createElement("template"); t.innerHTML = markup;
+    if (!this.firstChild) { this.appendChild(t.content); return; }
+    morphChildren(this, t.content);
+  },
+});
 function table(cols, rows, opts = {}) {
   if (!rows || !rows.length) return empty(opts.emptyTitle || "Nothing yet", opts.emptyBody || "");
   const th = cols.map(c => `<th class="${c.num ? "num" : ""}">${esc(c.h)}</th>`).join("");
@@ -500,16 +538,16 @@ const S = { page: "overview", paused: false, model: null, scenarios: null, lastR
 async function loadChrome() {
   try {
     const h = await api("/api/system/health");
-    $("sideHealth").innerHTML = h.components.map(c => `<div class="row" title="${esc(c.detail || "")}"><span class="dot ${stateCls(c.status)}"></span>${esc(c.component.replace("_", " "))}<span style="margin-left:auto;color:var(--muted)">${esc(c.status)}</span></div>`).join("");
+    $("sideHealth").html = h.components.map(c => `<div class="row" title="${esc(c.detail || "")}"><span class="dot ${stateCls(c.status)}"></span>${esc(c.component.replace("_", " "))}<span style="margin-left:auto;color:var(--muted)">${esc(c.status)}</span></div>`).join("");
     const k = h.components.find(c => c.component === "kubernetes");
     $("k8sPill").className = "pill " + stateCls(k.status); $("k8sPill").innerHTML = `<span class="dot"></span>cluster ${esc(k.status)}`;
     const cs = h.components.find(c => c.component === "capture_service");
     $("capPill").className = "pill " + stateCls(cs.status === "ok" ? "ok" : cs.status);
-    $("capPill").innerHTML = `<span class="dot"></span>capture ${cs.status === "ok" ? "running" : esc(cs.status)}`;
+    $("capPill").html = `<span class="dot"></span>capture ${cs.status === "ok" ? "running" : esc(cs.status)}`;
     S.health = h;
-    $("globalErr").innerHTML = "";
+    $("globalErr").html = "";
   } catch (e) {
-    $("globalErr").innerHTML = errBox(e.status === 404 ? "Live API not loaded (404). Run: pip install -r requirements.txt and restart the dashboard." : e);
+    $("globalErr").html = errBox(e.status === 404 ? "Live API not loaded (404). Run: pip install -r requirements.txt and restart the dashboard." : e);
   }
 }
 
@@ -573,7 +611,7 @@ async function pageOverview(full) {
   const lat = m.detection_latency_s || {};
   const node = r.cluster && r.cluster.available ? r.cluster.nodes[0] : null;
   const u = (v, unit) => `${v}<span class="unit">${unit}</span>`;
-  $("ovKpis").innerHTML = [
+  $("ovKpis").html = [
     kpi("Total network flows", fmt(m.total_flows), `${fmt(m.captures)} capture windows`),
     kpi("Packets captured", fmt(m.packets_captured), `${fmt((m.bytes_captured || 0) / 1048576, 1)} MB in all windows`),
     kpi("Benign flows", fmt(m.benign_flows), "scored BENIGN by the model"),
@@ -588,7 +626,7 @@ async function pageOverview(full) {
   ].join("");
   drawActivity(act);
   // events
-  $("ovEvents").innerHTML = ev.length ? ev.map(e => `<li><span class="when">${time(e.ts)}</span><span class="what">${e.kind === "detection" ? clsTag(e.title) : `<b>${esc(e.title)}</b>`}
+  $("ovEvents").html = ev.length ? ev.map(e => `<li><span class="when">${time(e.ts)}</span><span class="what">${e.kind === "detection" ? clsTag(e.title) : `<b>${esc(e.title)}</b>`}
     <span style="color:var(--muted)">${esc(e.src_ip || "")}${e.dst_ip ? " → " + esc(e.dst_ip) : ""}${e.dst_port ? ":" + esc(e.dst_port) : ""}${e.n ? " · " + fmt(e.n) + (e.kind === "detection" ? " flow(s)" : e.kind === "deception" ? " evidence" : " flows") : ""}${e.confidence ? " · conf " + fmt(e.confidence, 2) : ""}</span>${e.kind === "deception" && e.reason ? `<span class="hint" style="display:block;margin:2px 0 0;white-space:normal">${esc(e.trigger || "")} → ${esc(e.action)} (${esc(e.capture_file || "")}): ${esc(e.reason.slice(0, 220))}${e.evidence_flows && e.evidence_flows.length ? ` · evidence flows #${e.evidence_flows.slice(0, 5).join(", #")}` : ""}</span>` : ""}</span></li>`).join("")
     : `<li>${empty("No security events yet", "Generate attack traffic from the Traffic lab.")}</li>`;
   // distribution + classes
@@ -600,14 +638,25 @@ async function pageOverview(full) {
   const atk = Object.entries(byClass).filter(([c]) => c !== "BENIGN").sort((a, b) => b[1] - a[1]);
   plot("ovClasses", atk.length ? [{ type: "bar", x: atk.map(a => a[0]), y: atk.map(a => a[1]), marker: { color: atk.map(a => classColor(a[0])) },
     text: atk.map(a => fmt(a[1])), textposition: "outside", cliponaxis: false, hovertemplate: "%{x}: %{y:,}<extra></extra>" }] : null, {}, "No malicious flows detected yet");
-  setBadge(m.malicious_flows);
 }
 function setBadge(n) { const b = $("threatBadge"); b.hidden = !n; b.textContent = n > 999 ? "999+" : n; }
+/* Sidebar threat counter: the badge and the "current run" box show only the malicious flows
+   of the Traffic-lab run in progress and clear when it finishes; the total is separate. */
+const MAIN_CLASSES = ["PortScan", "BruteForce", "WebAttack", "DoS"];
+async function loadThreatCounter() {
+  let t; try { t = await api("/api/live/threat-counter"); } catch (_) { return; }
+  const run = t.run;
+  setBadge(run ? run.malicious : 0);
+  const cats = Array.from(new Set([...MAIN_CLASSES, ...Object.keys(t.total.by_class)]));
+  $("sideThreats").html = (run ? `<div class="run" title="Malicious flows detected since this run started">Current run · ${esc(run.scenario || "lab")}<br><b>${fmt(run.malicious)}</b> malicious flow${run.malicious === 1 ? "" : "s"}</div>` : "") +
+    `<div>Total attacks so far: <b style="color:var(--text)">${fmt(t.total.malicious)}</b></div><div class="cats">` +
+    cats.map(c => `<span>${esc(c)}</span><span>${fmt(t.total.by_class[c] || 0)}</span>`).join("") + `</div>`;
+}
 
 /* ---------------- B. Live traffic ---------------- */
 async function pageTraffic() {
   const cls = $("flClass").value, mal = $("flMal").value, src = $("flSrc").value.trim(), lim = $("flLimit").value;
-  if (src && !/^[0-9a-fA-F:.]{2,64}$/.test(src)) { $("flowsTable").innerHTML = errBox("Source IP: use an IPv4/IPv6 address"); return; }
+  if (src && !/^[0-9a-fA-F:.]{2,64}$/.test(src)) { $("flowsTable").html = errBox("Source IP: use an IPv4/IPv6 address"); return; }
   const lab = $("flLab").value, sess = $("flSession").value;
   const q = new URLSearchParams({ session: sess, page: S.flPage || 1, page_size: lim }); if (cls) q.set("predicted_class", cls); if (mal) q.set("malicious", mal); if (src) q.set("src_ip", src); if (lab) q.set("lab_scenario", lab);
   if ($("flLab").options.length === 3) api("/api/trafficlab/scenarios").then(sc => $("flLab").insertAdjacentHTML("beforeend",
@@ -619,22 +668,22 @@ async function pageTraffic() {
     sessions.map(x => `<option value="${x.id}">#${x.id} · ${time(x.started_at)}${x.scenarios.length ? " · " + esc(x.scenarios.join(", ")) : ""} · ${fmt(x.flows)} flows</option>`).join("") + `<option value="all">all sessions</option>`;
   ssel.value = [...ssel.options].some(o => o.value === keep) ? keep : "current"; }
   const ps = pg.session;
-  $("flHint").innerHTML = ps ? `Session #${ps.id}, started ${time(ps.started_at)}${ps.stopped_at ? ", stopped " + time(ps.stopped_at) : " (capturing)"}${ps.scenarios.length ? " · scenarios: " + esc(ps.scenarios.join(", ")) : ""} · newest first, refreshed every 5 s`
+  $("flHint").html = ps ? `Session #${ps.id}, started ${time(ps.started_at)}${ps.stopped_at ? ", stopped " + time(ps.stopped_at) : " (capturing)"}${ps.scenarios.length ? " · scenarios: " + esc(ps.scenarios.join(", ")) : ""} · newest first, refreshed every 5 s`
     : (sess === "all" ? "All capture sessions · newest first" : "No capture session yet: start capture to begin a new session");
   const sv = cs.service, last = (cs.recent || [])[0];
-  $("capHint").innerHTML = !cs.support.supported ? `<span style="color:var(--warning-ink)">Capture unavailable: ${esc(cs.support.reason)}</span>`
+  $("capHint").html = !cs.support.supported ? `<span style="color:var(--warning-ink)">Capture unavailable: ${esc(cs.support.reason)}</span>`
     : !cs.cicflowmeter.supported ? `<span style="color:var(--warning-ink)">Capture works but CICFlowMeter is unavailable: ${esc(cs.cicflowmeter.reason)}</span>`
     : `tcpdump on <code>${esc(sv.interface || "cni0")}</code> → CICFlowMeter → model. ${cs.pending.length ? cs.pending.length + " PCAP(s) waiting to be processed." : ""}`;
   $("capStart").disabled = !!sv.running || !cs.support.supported; $("capStop").disabled = !sv.running; $("capProcess").disabled = !cs.pending.length;
   const failed = (cs.recent || []).filter(c => c.status === "failed").length;
-  $("capKpis").innerHTML = [
+  $("capKpis").html = [
     kpi("Capture status", esc(sv.running ? "running" : (sv.status || "never started").replace("_", " ")), sv.running ? `pid ${sv.pid} · since ${time(sv.started_at)}` : (sv.error ? esc(sv.error) : ""), sv.running ? "ok" : (sv.status === "error" || sv.status === "stopped_unexpectedly" ? "error" : "idle")),
     kpi("Windows captured", fmt(sv.windows), `${fmt(sv.processed)} processed · ${fmt(sv.failed)} failed`),
     kpi("Current window", sv.running ? fmt(sv.current_window_s) + " s" : NA, "adaptive (Observation window page)"),
     kpi("Last window", last ? fmt(last.packets) + " pkts" : NA, last ? `${fmt(last.duration_s, 1)} s · ${fmt((last.bytes || 0) / 1024, 1)} KB · ${esc(last.status)}` : "no PCAP yet", last ? (last.status === "failed" ? "error" : "ok") : null),
     kpi("Flows in last window", last ? fmt(last.flows) : NA, last && last.error ? `<span style="color:var(--critical-ink)">${esc(last.error.slice(0, 90))}</span>` : (failed ? `${failed} of last 20 windows failed` : "")),
   ].join("");
-  $("flowsTable").innerHTML = table([
+  $("flowsTable").html = table([
     { h: "Time", f: r => time(r.detected_at) }, { h: "Flow ID", f: r => `<span class="mono" title="${esc(r.flow_id || "")} · session #${esc(r.session_id ?? "—")}">${esc(r.id)}</span>` }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}:${esc(r.src_port)}</span>` },
     { h: "Destination", f: r => `<span class="mono">${esc(r.dst_ip)}:${esc(r.dst_port)}</span>` },
     { h: "Proto", f: r => ({ 6: "TCP", 17: "UDP", 1: "ICMP" }[r.protocol] || esc(r.protocol)) },
@@ -646,7 +695,7 @@ async function pageTraffic() {
   const P = pg.page, N = pg.pages, nums = [...new Set([1, P - 2, P - 1, P, P + 1, P + 2, N])].filter(n => n >= 1 && n <= N).sort((a, b) => a - b);
   let prev = 0, links = "";
   for (const n of nums) { if (n - prev > 1) links += `<span style="color:var(--muted)">…</span>`; links += `<button class="btn small${n === P ? " primary" : ""}" data-pg="${n}" ${n === P ? 'aria-current="page"' : ""}>${n}</button>`; prev = n; }
-  $("flPager").innerHTML = `<span class="hint" style="margin:0">${fmt(pg.total)} flows · page ${fmt(P)} of ${fmt(N)}</span>` +
+  $("flPager").html = `<span class="hint" style="margin:0">${fmt(pg.total)} flows · page ${fmt(P)} of ${fmt(N)}</span>` +
     `<span style="display:flex;gap:6px;align-items:center;flex-wrap:wrap"><button class="btn small" data-pg="${P - 1}" ${P <= 1 ? "disabled" : ""}>Previous</button>${links}<button class="btn small" data-pg="${P + 1}" ${P >= N ? "disabled" : ""}>Next</button></span>`;
 }
 
@@ -654,7 +703,7 @@ async function pageTraffic() {
 async function pageThreats(full) {
   if (!S.model || full) S.model = await api("/api/model");
   const md = S.model, best = md.models[md.best_model];
-  $("thClasses").innerHTML = table([
+  $("thClasses").html = table([
     { h: "Class", f: r => clsTag(r.class) }, { h: "Training flows", num: 1, f: r => fmt(r.train_samples) },
     { h: "Test F1", num: 1, f: r => fmt(r.f1, 3) }, { h: "Detection", f: r => r.class === "BENIGN" ? "—" : (r.reliable ? pill("reliable", "ok") : pill("limited", "degraded")) },
   ], md.reliability, { maxH: "320px" }) + `<p class="hint" style="margin-top:8px">${esc(md.reliability_rule)}. ${md.source ? "Trained on " + esc(md.source) + "." : "Not in this model: Infiltration and Heartbleed (too few samples, dropped in training)."} Model: ${esc(md.best_model)} (${esc(md.name)}), macro F1 ${fmt(best.macro_f1, 4)}.</p>`;
@@ -663,17 +712,19 @@ async function pageThreats(full) {
   const [rows, bursts, bcount] = await Promise.all([api("/api/live/detections?" + q), api("/api/live/bursts?limit=100"), api("/api/live/bursts/count")]);
   $("thBurstCount").textContent = ` · ${fmt(bcount.open)} open alert${bcount.open === 1 ? "" : "s"}` + (bcount.open > bursts.length ? ` (newest ${bursts.length} shown)` : "");
   const minc = +$("thConf").value;
-  $("thTable").innerHTML = table([
+  $("thTable").html = table([
     { h: "Detected", f: r => `${time(r.detected_at)} <span style="color:var(--muted)">${ago(r.detected_at)}</span>` }, { h: "Class", f: r => clsTag(r.predicted_class) },
     { h: "Confidence", num: 1, f: r => fmt(r.confidence, 3) },
     { h: "Status", f: r => pill(r.confidence >= 0.9 ? "high confidence" : r.confidence >= 0.6 ? "medium" : "low", r.confidence >= 0.9 ? "error" : r.confidence >= 0.6 ? "degraded" : "idle") },
     { h: "Flow", f: r => `<span class="mono">${esc(r.src_ip)}:${esc(r.src_port)} → ${esc(r.dst_ip)}:${esc(r.dst_port)}</span>` },
+    { h: "Target node", f: r => r.dst_node ? `<span title="${esc(r.dst_pod || "")}">${esc(r.dst_node)}</span>` : NA },
     { h: "Duration", num: 1, f: r => r.flow_duration_us == null ? "—" : fmt(r.flow_duration_us / 1000, 1) + " ms" },
     { h: "Packets", num: 1, f: r => fmt(r.packets) }, { h: "Bytes", num: 1, f: r => fmt(r.bytes) }, { h: "Model", k: "model" },
   ], rows.filter(r => r.confidence >= minc), { emptyTitle: "No malicious flows", emptyBody: "The model has not flagged any captured flow as an attack." });
-  $("thBursts").innerHTML = table([
+  $("thBursts").html = table([
     { h: "Detected", f: r => time(r.detected_at) }, { h: "Type", f: r => r.alert_type === "port_sweep" ? pill("port sweep", "degraded") : pill("flow burst", "degraded") },
-    { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>` }, { h: "Target", f: r => `<span class="mono">${esc(r.dst_ip)}${r.dst_port ? ":" + esc(r.dst_port) : ""}</span>` },
+    { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>` }, { h: "Target", f: r => `<span class="mono">${esc(r.dst_ip)}${r.dst_port ? ":" + esc(r.dst_port) : ""}</span>` + (r.dst_pod ? `<br><span class="na mono">${esc(r.dst_pod)}</span>` : "") },
+    { h: "Target node", f: r => r.dst_node ? esc(r.dst_node) : NA },
     { h: "Flows", num: 1, f: r => fmt(r.flows) }, { h: "Ports", num: 1, f: r => fmt(r.distinct_ports) }, { h: "Rate /s", num: 1, f: r => fmt(r.rate_per_s, 2) },
     { h: "Window", num: 1, f: r => fmt(r.window_s, 1) + " s" }, { h: "ML malicious in burst", num: 1, f: r => fmt(r.ml_malicious_flows) },
     { h: "Actions", f: r => `<button class="btn small danger" data-del-alert="${esc(r.id)}" aria-label="Delete alert ${esc(r.id)}" title="Delete this alert">Delete</button>` },
@@ -682,7 +733,7 @@ async function pageThreats(full) {
 async function runEval(btn) {
   const r = await act(btn, () => api("/api/model/evaluate-sample"), r => `Labelled check: accuracy ${pct(r.accuracy, 2)}`);
   if (!r) return;
-  $("evalOut").innerHTML = `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(130px,1fr))">${kpi("Accuracy", pct(r.accuracy, 2), fmt(r.rows) + " labelled flows · " + esc(r.sample || ""))}${kpi("Attack detection", pct(r.binary.attack_detection_rate, 2))}${kpi("False alarms", pct(r.binary.false_alarm_rate, 3))}</div>` +
+  $("evalOut").html = `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(130px,1fr))">${kpi("Accuracy", pct(r.accuracy, 2), fmt(r.rows) + " labelled flows · " + esc(r.sample || ""))}${kpi("Attack detection", pct(r.binary.attack_detection_rate, 2))}${kpi("False alarms", pct(r.binary.false_alarm_rate, 3))}</div>` +
     table([{ h: "Class", f: x => clsTag(x.c) }, { h: "Flows", num: 1, f: x => fmt(x.support) }, { h: "Precision", num: 1, f: x => fmt(x.precision, 3) }, { h: "Recall", num: 1, f: x => fmt(x.recall, 3) }, { h: "F1", num: 1, f: x => fmt(x.f1, 3) }],
       Object.entries(r.per_class).map(([c, v]) => Object.assign({ c }, v)), { maxH: "260px" });
 }
@@ -692,14 +743,14 @@ async function pageWindow() {
   const changed = $("winChanged").checked;
   const [ws, all] = await Promise.all([api("/api/window/status"), api("/api/window/history?limit=300")]);
   const p = ws.policy, ld = ws.last_decision, ev = ld ? ld.evidence || {} : {};
-  $("winKpis").innerHTML = [
+  $("winKpis").html = [
     kpi("Current window", ws.running ? fmt(ws.current_window_s) + " s" : NA, ws.running ? "capture running" : "capture not running", ws.running ? "ok" : "idle"),
     kpi("Available sizes", p.sizes.map(s => s + " s").join(" · "), `min ${p.min_seconds} s · max ${p.max_seconds} s`),
     kpi("Last rule", ld ? esc(ld.rule) : NA, ld ? esc(ld.reason.slice(0, 80)) : ""),
     kpi("Traffic volume", ev.pps === null || ev.pps === undefined ? NA : fmt(ev.pps, 1) + " pkt/s", ev.packets != null ? `${fmt(ev.packets)} packets in ${fmt(ev.duration_s, 1)} s` : ""),
     kpi("Threat evidence", ld ? (ev.threat ? `<span style="color:var(--critical-ink)">yes</span>` : "none") : NA, ld ? `${fmt(ev.malicious_flows)} malicious flows · ${fmt(ev.bursts)} alerts · calm streak ${fmt(ev.calm_streak)}` : "", ld ? (ev.threat ? "error" : "ok") : null),
   ].join("");
-  $("winPolicy").innerHTML = table([{ h: "Rule", f: r => `<b>${esc(r.id)}</b>` }, { h: "When", wrap: 1, k: "when" }, { h: "Then", f: r => `<span style="white-space:normal;display:inline-block;min-width:140px">${esc(r.then)}</span>` }], p.rules) +
+  $("winPolicy").html = table([{ h: "Rule", f: r => `<b>${esc(r.id)}</b>` }, { h: "When", wrap: 1, k: "when" }, { h: "Then", f: r => `<span style="white-space:normal;display:inline-block;min-width:140px">${esc(r.then)}</span>` }], p.rules) +
     `<p class="hint" style="margin-top:8px">Initial window ${p.initial_seconds} s. Threat evidence uses ML confidence ≥ ${p.evidence_confidence}. Shorter windows cut TCP flows into more pieces (CICFlowMeter converts each window separately), so threats shrink to ${p.threat_seconds} s rather than the minimum.</p>`;
   const pts = all.filter(r => r.rule !== "start").reverse();
   const ruleColor = { R1_threat: cssVar("--critical"), R2_high_rate: cssVar("--warning"), R3_calm: cssVar("--good"), R4_hold: cssVar("--muted") };
@@ -708,7 +759,7 @@ async function pageWindow() {
     customdata: pts.map(r => [r.rule, r.reason]), hovertemplate: "%{x|%H:%M:%S} → %{y} s<br>%{customdata[0]}<extra></extra>" }] : null,
     { yaxis: Object.assign(layout().yaxis, { title: { text: "next window (s)", font: { size: 11 } }, tickvals: p.sizes }) }, "No windows captured yet");
   const rows = changed ? all.filter(r => r.changed) : all;
-  $("winTable").innerHTML = table([
+  $("winTable").html = table([
     { h: "Time", f: r => time(r.created_at) }, { h: "Change", f: r => `${r.previous_s ?? "—"} → <b>${r.next_s}</b> s` }, { h: "Rule", f: r => esc(r.rule) },
     { h: "Packets/s", num: 1, f: r => fmt((r.evidence || {}).pps, 1) }, { h: "Reason", wrap: 1, k: "reason" }, { h: "PCAP", f: r => `<span class="mono">${esc((r.pcap_file || "").slice(-30))}</span>` },
   ], rows.slice(0, 200), { emptyTitle: changed ? "No window changes yet" : "No windows yet", emptyBody: "Start capture; every window records a decision." });
@@ -718,9 +769,9 @@ async function pageWindow() {
 async function loadScenarios() {
   if (S.scenarios) return;
   S.scenarios = await api("/api/trafficlab/scenarios");
-  $("labScenarios").innerHTML = Object.entries(S.scenarios.scenarios).map(([k, v]) =>
+  $("labScenarios").html = Object.entries(S.scenarios.scenarios).map(([k, v]) =>
     `<label title="${esc(v.description)}"><input type="checkbox" name="labSc" value="${esc(k)}" ${k === "port_scan" ? "checked" : ""}> ${esc(k)} <small>${v.expect_class ? "expects " + esc(v.expect_class) : "no expected class"} · ${fmt(v.count)} × ${v.delay}s</small></label>`).join("");
-  $("labTargets").innerHTML = Object.entries(S.scenarios.targets).map(([k, v]) =>
+  $("labTargets").html = Object.entries(S.scenarios.targets).map(([k, v]) =>
     `<label><input type="checkbox" name="labTg" value="${esc(k)}" ${k === "nodered" ? "checked" : ""}> ${esc(k)} <small>${esc(v.host.split(".")[0])}:${v.port}</small></label>`).join("");
   document.querySelectorAll('input[name="labSc"]').forEach(c => c.addEventListener("change", onScenario));
   onScenario();
@@ -757,19 +808,19 @@ async function pageLab(full) {
     full || S.slow % 3 === 0 || !S.pre ? api("/api/pipeline/preflight") : Promise.resolve(S.pre),
     api("/api/trafficlab/jobs").catch(e => ({ error: e.message })), api("/api/trafficlab/baseline"), api("/api/pipeline/status")]);
   S.pre = pre;
-  $("labPre").innerHTML = pre.steps.map(s => `<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0"><span class="dot ${s.ok ? "s-ok" : (s.id === "running" ? "s-idle" : "s-bad")}" style="margin-top:6px"></span><div><div>${esc(s.label)}</div>${s.detail && !s.ok ? `<div class="hint" style="margin:0">${esc(s.detail)}${s.fix ? " — <code>" + esc(s.fix) + "</code>" : ""}</div>` : ""}</div></div>`).join("");
+  $("labPre").html = pre.steps.map(s => `<div style="display:flex;gap:8px;align-items:flex-start;padding:4px 0"><span class="dot ${s.ok ? "s-ok" : (s.id === "running" ? "s-idle" : "s-bad")}" style="margin-top:6px"></span><div><div>${esc(s.label)}</div>${s.detail && !s.ok ? `<div class="hint" style="margin:0">${esc(s.detail)}${s.fix ? " — <code>" + esc(s.fix) + "</code>" : ""}</div>` : ""}</div></div>`).join("");
   $("labRun").disabled = $("labLaunch").disabled = !pre.can_generate;
   $("baseState").outerHTML = base.available ? `<span id="baseState" class="pill ${stateCls(base.running ? "ok" : "idle")}"><span class="dot"></span>${base.running ? "running" : "stopped"} (${base.ready}/${base.replicas})</span>`
     : `<span id="baseState" class="pill s-warn"><span class="dot"></span>${esc((base.error || "unavailable").slice(0, 50))}</span>`;
   $("baseOn").disabled = !base.available || base.replicas > 0; $("baseOff").disabled = !base.available || !base.replicas;
   if (run.run) {
     const as = run.auto_stop || {};
-    $("runHint").innerHTML = `${esc(run.run.scenario)} → ${esc(run.run.target)} · started ${ago(run.run.started_at)} · ${fmt((run.jobs || []).length)} Job(s)` +
+    $("runHint").html = `${esc(run.run.scenario)} → ${esc(run.run.target)} · started ${ago(run.run.started_at)} · ${fmt((run.jobs || []).length)} Job(s)` +
       (as.enabled !== undefined || as.state ? ` · auto-stop: ${esc(as.state || "off")}${as.detail ? " (" + esc(as.detail) + ")" : ""}` : "") + `. ${esc(run.hint)}`;
-    $("runSteps").innerHTML = run.stages.map(s => `<div class="step ${s.state}"><div class="t"><span class="dot ${stateCls(s.state)}"></span>${esc(s.label)}</div><div class="d">${esc(s.detail)}</div></div>`).join("");
+    $("runSteps").html = run.stages.map(s => `<div class="step ${s.state}"><div class="t"><span class="dot ${stateCls(s.state)}"></span>${esc(s.label)}</div><div class="d">${esc(s.detail)}</div></div>`).join("");
     const bc = Object.entries(run.by_class || {});
     const fails = (run.jobs || []).filter(j => j.failure);
-    $("runClasses").innerHTML = fails.map(j => errBox(`${j.job} (${j.scenario} → ${j.target_label || j.target}) failed: ${j.failure.summary}`)).join("") +
+    $("runClasses").html = fails.map(j => errBox(`${j.job} (${j.scenario} → ${j.target_label || j.target}) failed: ${j.failure.summary}`)).join("") +
       ((run.run.launch_errors || []).map(e => errBox(`${e.scenario} → ${e.target || "default"} not launched: ${e.error}`)).join("")) +
       (run.jobs && run.jobs.length ? `<h3 style="font-size:13px;margin:8px 0 6px">Expected vs predicted, per Job</h3>` + table([
         { h: "Job", f: j => `<span class="mono">${esc(j.job)}</span>` }, { h: "Attack → target", f: j => `${esc(j.scenario)} → ${esc(j.target_label || j.target)}` },
@@ -783,7 +834,7 @@ async function pageLab(full) {
       ], run.jobs, { maxH: "320px" }) : "") +
       (bc.length ? `<div class="hint" style="margin-top:8px">All flows scored since the run started: ${bc.map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" &nbsp; ")} · behaviour alerts ${fmt(run.bursts)} · deception decisions ${fmt(run.decisions)}</div>` : "");
   }
-  $("jobsTable").innerHTML = jobs.error ? errBox(jobs.error) : table([
+  $("jobsTable").html = jobs.error ? errBox(jobs.error) : table([
     { h: "Job", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Scenario", k: "scenario" }, { h: "Target", f: r => `<span class="mono">${esc(r.target || "—")}</span>` },
     { h: "State", f: r => pill(r.state, r.state) + (r.failure ? `<div class="hint" style="margin:2px 0 0;white-space:normal;max-width:340px;color:var(--critical-ink)">${esc(r.failure)}</div>` : "") },
     { h: "Expected", f: r => r.expect_class ? clsTag(r.expect_class) : "—" }, { h: "Started", f: r => ago(r.started) },
@@ -791,16 +842,16 @@ async function pageLab(full) {
   ], jobs, { emptyTitle: "No traffic Jobs", emptyBody: "Launch a scenario above." });
 }
 async function showJob(name) {
-  $("jdTitle").textContent = name; $("jdBody").innerHTML = '<div class="loading">Reading generator log…</div>'; $("jobDialog").showModal();
+  $("jdTitle").textContent = name; $("jdBody").html = '<div class="loading">Reading generator log…</div>'; $("jobDialog").showModal();
   try {
     const j = await api("/api/trafficlab/jobs/" + encodeURIComponent(name)), v = j.verification;
-    $("jdBody").innerHTML = `<dl class="kv"><dt>Scenario</dt><dd>${esc(j.scenario)}</dd><dt>Target</dt><dd class="mono">${esc(j.target)}</dd><dt>State</dt><dd>${pill(j.state, j.state)}</dd>
+    $("jdBody").html = `<dl class="kv"><dt>Scenario</dt><dd>${esc(j.scenario)}</dd><dt>Target</dt><dd class="mono">${esc(j.target)}</dd><dt>State</dt><dd>${pill(j.state, j.state)}</dd>
       <dt>Verified</dt><dd>${v.verified ? pill("yes: target answered", "ok") : pill("no answered connections", "error")}</dd>
       <dt>Answered / failed</dt><dd>${fmt(v.ok)} / ${fmt(v.errors)} ${Object.keys(v.http_status).length ? "· HTTP " + esc(JSON.stringify(v.http_status)) : ""} ${Object.keys(v.error_types).length ? "· errors " + esc(JSON.stringify(v.error_types)) : ""}</dd>
       <dt>Actions</dt><dd>${esc(JSON.stringify(v.actions))}</dd></dl>
       ${j.failure ? errBox(`Failed: ${j.failure.summary}`) + `<dl class="kv"><dt>Job condition</dt><dd>${esc(j.failure.job_reason || "—")}${j.failure.job_message ? ": " + esc(j.failure.job_message) : ""}</dd><dt>Exit</dt><dd>${j.failure.exit_code == null ? "no exit code (pod deleted)" : esc(j.failure.container_reason || "") + " · code " + esc(j.failure.exit_code)}</dd><dt>Time limit</dt><dd>${fmt(j.failure.deadline_seconds)} s</dd></dl>` : ""}
       ${j.log_error ? errBox(j.log_error) : ""}<div class="note" style="margin-top:10px;max-height:240px;overflow:auto"><pre class="log">${esc((j.log_tail || []).join("\n")) || "no log output yet"}</pre></div>`;
-  } catch (e) { $("jdBody").innerHTML = errBox(e); }
+  } catch (e) { $("jdBody").html = errBox(e); }
 }
 
 /* ---------------- E. Deception: thresholds ---------------- */
@@ -811,14 +862,14 @@ function renderPolicy(st) {
   const form = $("polForm");
   if (!S.polDirty && !form.contains(document.activeElement)) {
     const rows = Object.entries(pol.classes).sort(([a], [b]) => a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b));
-    $("polTable").innerHTML = table([{ h: "Class", f: ([c]) => c === "default" ? "<i>default (other classes)</i>" : clsTag(c) },
+    $("polTable").html = table([{ h: "Class", f: ([c]) => c === "default" ? "<i>default (other classes)</i>" : clsTag(c) },
       ...POL_FIELDS.map(([k, label, lo, hi, step]) => ({ h: label, f: ([c, v]) => `<input class="polin" data-cls="${esc(c)}" data-k="${k}" type="number" min="${lo}" max="${hi}" step="${step}" value="${v[k]}" aria-label="${esc(c)} ${esc(label)}" style="width:92px">` }))],
       rows, { maxH: "340px" }) +
       `<div class="form" style="margin-top:10px">${HYS_FIELDS.map(([k, label, lo, hi, step]) => `<label class="field">${esc(label)}<input class="hysin" data-k="${k}" type="number" min="${lo}" max="${hi}" step="${step}" value="${pol.hysteresis[k]}"><span class="err"></span></label>`).join("")}</div>` +
       `<p class="hint" style="margin-top:6px">${pol.overridden ? `Saved overrides in use (updated ${ago(pol.updated_at)}).` : "Defaults from config/live.yaml → deception.detection_policy."} Once a source triggers, it stays engaged (decoys up, redirected) while its evidence stays above the hold fraction; it is released, its redirect undone and its decoys torn down after the quiet period.</p>`;
   }
   const eng = st.engagements || [];
-  $("polEng").innerHTML = `<h3 style="font-size:13px;margin:0 0 6px">Engaged sources</h3>` + table([
+  $("polEng").html = `<h3 style="font-size:13px;margin:0 0 6px">Engaged sources</h3>` + table([
     { h: "#", num: 1, k: "id" }, { h: "Source", f: e => `<span class="mono">${esc(e.src_ip)}</span>` }, { h: "Class", f: e => CLASS_COLORS[e.attack_class] ? clsTag(e.attack_class) : esc(e.attack_class || "—") },
     { h: "Since", f: e => ago(e.started_at) }, { h: "Last evidence", f: e => ago(e.last_evidence_at) },
     { h: "Redirect", wrap: 1, f: e => (e.redirect || {}).applied ? pill("quarantined to decoys", "ok") + ` <span class="mono">${esc(e.redirect.namespace)}/${esc(e.redirect.pod)}</span>` : `<span class="hint">${esc((e.redirect || {}).reason || "—")}</span>` },
@@ -835,16 +886,63 @@ function policyBody() {
 }
 
 /* ---------------- E. Deception ---------------- */
+const podRef = (p, ip) => p && p.pod ? `<span class="mono">${esc(p.namespace)}/${esc(p.pod)}</span><br><span class="mono">${esc(p.ip || ip || "")}</span>` : `<span class="mono">${esc(ip || (p || {}).ip || "—")}</span> <span class="na">(not a lab pod)</span>`;
+const nodeTag = n => n ? `<span class="pill s-idle" title="Kubernetes node"><span class="dot"></span>node ${esc(n)}</span>` : `<span class="na">node —</span>`;
+function renderLive(lv) {
+  const engs = lv.engagements.filter(e => e.state === "active" || (e.released_at && Date.now() - new Date(e.released_at).getTime() < 15 * 60e3));
+  $("decLive").html = engs.length ? engs.map(e => {
+    const rd = e.redirect || {}, tr = e.traffic || {}, t = e.target || {}, a = e.attacker || {};
+    const svc = (t.services || []).map(s => `${s.name}:${(s.ports || []).join("/")}`).join(", ");
+    const pods = e.decoy_pods.filter(p => !p.deleting);
+    const dp = pods.find(p => p.decoy === rd.decoy) || pods[0];
+    const decoyCell = dp ? `<span class="mono">${esc(dp.namespace)}/${esc(dp.pod)}</span><br><span class="mono">${esc(dp.ip || "no IP yet")}</span> ${pill(dp.ready ? "Running" : dp.phase || "Pending", dp.ready ? "ok" : "pending")}<br>${nodeTag(dp.node)}`
+      : (e.decoy_rows.length ? `<span class="mono">${esc(e.decoy_rows.map(d => d.name).join(", "))}</span><br>${pill(e.state === "active" ? "no pod yet" : "removed", e.state === "active" ? "pending" : "idle")}` : `<span class="na">no decoy yet</span>`);
+    const redirected = rd.applied ? pill("redirected", "ok") : rd.pending ? pill("waiting for Ready decoy", "pending") : pill("not redirected", "idle");
+    return `<div class="card" style="margin:0 0 10px;background:var(--surface-2)">
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><b>#${e.id}</b> ${CLASS_COLORS[e.attack_class] ? clsTag(e.attack_class) : esc(e.attack_class)} ${pill(e.state, e.state === "active" ? "ok" : "idle")} ${redirected} ${nodeTag(e.node)} <span class="na">since ${time(e.started_at)}${e.released_at ? " · released " + time(e.released_at) : ""}</span></div>
+      <div class="grid" style="grid-template-columns:1fr auto 1fr auto 1fr;gap:8px;align-items:center">
+        <div><div class="label hint">Attacker</div>${podRef(a, e.src_ip)}<br>${nodeTag(a.node)}</div><div aria-hidden="true">→</div>
+        <div><div class="label hint">Target${svc ? " · service " + esc(svc) : ""}</div>${podRef(t)}<br>${nodeTag(t.node)}</div><div aria-hidden="true">→</div>
+        <div><div class="label hint">Decoy</div>${decoyCell}</div>
+      </div>
+      <div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:10px">
+        ${kpi("Flows to decoy", fmt(tr.decoy_flows), tr.decoy_last_flow ? "last " + ago(tr.decoy_last_flow) : "none captured yet", tr.decoy_flows ? "ok" : null)}
+        ${kpi("Packets to decoy", fmt(tr.decoy_packets), fmt(tr.decoy_bytes) + " bytes")}
+        ${kpi("Requests in decoy log", fmt(tr.decoy_requests), tr.decoy_last_request ? "last " + ago(tr.decoy_last_request) : "none yet")}
+        ${kpi("Flows to real target", tr.target_flows_since_redirect == null ? NA : fmt(tr.target_flows_since_redirect), rd.applied ? "since the redirect" : "since engagement")}
+      </div>
+      <p class="hint" style="margin-top:6px">${esc(rd.reason || "")}</p></div>`;
+  }).join("") : empty("No engaged attacker", "When deception is enabled and an attack crosses the thresholds, its attacker, target pod, node and decoy appear here.");
+  $("decPods").html = lv.decoy_pods_error ? errBox(lv.decoy_pods_error) : table([
+    { h: "Pod", f: r => `<span class="mono">${esc(r.pod)}</span>` }, { h: "Namespace", k: "namespace" }, { h: "Node", k: "node" },
+    { h: "Pod IP", f: r => `<span class="mono">${esc(r.ip || "—")}</span>` },
+    { h: "Status", f: r => r.deleting ? pill("Terminating", "idle") : pill(r.ready ? "Running" : r.phase || "Pending", r.ready ? "ok" : "pending") }, { h: "Created", f: r => `${time(r.created)} <span class="na">${ago(r.created)}</span>` },
+  ], lv.decoy_pods, { emptyTitle: "No decoy pods", emptyBody: "Decoy pods appear here as soon as they are scheduled." });
+  const e0 = engs.find(e => e.state === "active") || engs[0], a = (e0 && e0.attacker) || {}, rd = (e0 && e0.redirect) || {};
+  const ap = a.pod ? `${a.pod} -n ${a.namespace}` : "<attacker-pod> -n ids-traffic", dn = rd.decoy || (e0 && e0.decoys[0]) || "<decoy-name>";
+  const cmds = [
+    ["Decoy pods with node and IP", "kubectl get pods -n ids-deception -o wide -l app.kubernetes.io/component=decoy"],
+    ["Decoy Services and their endpoints (pod IPs behind the Service)", "kubectl get svc,endpoints -n ids-deception -l app.kubernetes.io/managed-by=ids-deception-controller"],
+    ["Which node the decoy was pinned to", `kubectl get deploy ${dn} -n ids-deception -o jsonpath='{.spec.template.spec.nodeSelector}'`],
+    ["Requests the decoy received (one JSON line per request, with src_ip)", `kubectl logs -n ids-deception -l ids/decoy=${dn} --tail=20`],
+    ["Attacker pod: quarantine label and redirect annotations", `kubectl get pod ${ap} -o jsonpath='{.metadata.labels}{"\n"}{.metadata.annotations}{"\n"}'`],
+    ["Attacker side: the generator logs the redirect", `kubectl logs ${ap} | grep redirected`],
+    ["Quarantine NetworkPolicy (egress only to decoys + DNS)", "kubectl get networkpolicy -n ids-traffic traffic-lab-quarantine -o yaml"],
+  ];
+  $("decCmds").html = cmds.map(([h, c]) => `<div style="margin-bottom:8px"><div class="hint">${esc(h)}</div><code class="mono" style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--surface-2);padding:6px 8px;border-radius:6px">${esc(c)}</code></div>`).join("") +
+    `<p class="hint">How the redirect works: the controller labels the attacker pod <span class="mono">ids-deception/quarantine=true</span> (a NetworkPolicy then lets it reach only the decoys and DNS) and annotates it with <span class="mono">ids-deception/redirect-to</span> and <span class="mono">ids-deception/redirect-only</span>. The lab generator reads its own annotations and sends new connections aimed at the attacked pod to the decoy. It is not an iptables DNAT on the node (that needs root on the node).</p>`;
+}
 async function pageDeception() {
-  const [st, pol, decoys, dec, inter] = await Promise.all([api("/api/deception/status"), S.policy ? Promise.resolve(S.policy) : api("/api/deception/policy"),
-    api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200")]);
+  const [st, pol, decoys, dec, inter, lv] = await Promise.all([api("/api/deception/status"), S.policy ? Promise.resolve(S.policy) : api("/api/deception/policy"),
+    api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200"), api("/api/deception/live?limit=20")]);
+  renderLive(lv);
   S.policy = pol;
   const ps = $("decProfile"); if (!ps.options.length) Object.keys(pol.profiles).forEach(p => ps.add(new Option(p, p)));
   $("decEnable").disabled = st.enabled; $("decDisable").disabled = !st.enabled;
-  $("decHint").innerHTML = `${st.enabled ? "Automatic deception is <b>enabled</b>" : "Automatic deception is <b>disabled</b> (decoys are only deployed manually)"} · loop ${st.loop_running ? "running" : "<span style='color:var(--critical-ink)'>stopped</span>"} · stage ${esc(st.stage)}${st.kubernetes_available ? "" : ` · <span style="color:var(--warning-ink)">Kubernetes unavailable: ${esc(st.kubernetes_error)}</span>`}`;
+  $("decHint").html = `${st.enabled ? "Automatic deception is <b>enabled</b>" : "Automatic deception is <b>disabled</b> (decoys are only deployed manually)"} · loop ${st.loop_running ? "running" : "<span style='color:var(--critical-ink)'>stopped</span>"} · stage ${esc(st.stage)}${st.kubernetes_available ? "" : ` · <span style="color:var(--warning-ink)">Kubernetes unavailable: ${esc(st.kubernetes_error)}</span>`}`;
   const cl = st.cluster_decoys || [];
   const lc = st.last_cycle || {};
-  $("decKpis").innerHTML = [
+  $("decKpis").html = [
     kpi("Automatic deception", st.enabled ? "enabled" : "disabled", `cycle every few seconds · last #${fmt(lc.cycle_id)}`, st.enabled ? "ok" : "idle"),
     kpi("Decoys ready in cluster", st.kubernetes_available ? `${cl.filter(d => d.ready_replicas > 0 && (d.endpoints == null || d.endpoints > 0)).length} / ${cl.length}` : NA, "ready pods with Service endpoints"),
     kpi("Active (tracked)", fmt(st.active_decoys.filter(d => d.status === "active").length), `${fmt(st.active_decoys.filter(d => d.status === "deploying").length)} deploying · max ${st.limits.max_active_decoys}`),
@@ -852,27 +950,27 @@ async function pageDeception() {
     kpi("Engaged sources", fmt((st.engagements || []).length), `${fmt((st.engagements || []).filter(e => (e.redirect || {}).applied).length)} redirected to decoys`),
   ].join("");
   renderPolicy(st);
-  $("decCluster").innerHTML = st.cluster_error ? errBox(st.cluster_error) : !st.kubernetes_available ? empty("Kubernetes unavailable", st.kubernetes_error || "") : table([
-    { h: "Decoy", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Profile", k: "profile" },
+  $("decCluster").html = st.cluster_error ? errBox(st.cluster_error) : !st.kubernetes_available ? empty("Kubernetes unavailable", st.kubernetes_error || "") : table([
+    { h: "Decoy", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Profile", k: "profile" }, { h: "Node", f: r => esc(r.node || "any") },
     { h: "Ready", f: r => { const ok = r.ready_replicas > 0 && (r.endpoints == null || r.endpoints > 0); return pill(`${r.ready_replicas}/${r.replicas}${r.endpoints != null ? " · " + r.endpoints + " ep" : ""}`, ok ? "ok" : "deploying"); } },
     { h: "Service", f: r => `<span class="mono">${esc(r.service_ip)}:${esc(r.port)}</span>` }, { h: "Namespace", f: () => "ids-deception" }, { h: "Created", f: r => ago(r.created) },
     { h: "", f: r => `<button class="btn small danger" data-rmdecoy="${esc(r.name)}">Remove</button>` },
   ], cl, { emptyTitle: "No decoys running", emptyBody: "Deploy one manually or enable automatic deception and generate attack traffic." });
-  $("decPolicy").innerHTML = table([{ h: "Evidence", f: r => esc(r[0]) }, { h: "Decoy profiles", f: r => esc(r[1].join(", ")) }],
+  $("decPolicy").html = table([{ h: "Evidence", f: r => esc(r[0]) }, { h: "Decoy profiles", f: r => esc(r[1].join(", ")) }],
     [...Object.entries(pol.attack_policy).map(([k, v]) => ["ML: " + k, v]), ...Object.entries(pol.behavior_policy).map(([k, v]) => [k === "sweep" ? "Port sweep" : k === "default" ? "Flow burst (other port)" : "Flow burst → :" + k, v])], { maxH: "300px" }) +
     `<p class="hint" style="margin-top:8px">TTL ${pol.decoy_ttl_seconds}s, extended by every interaction; at most ${pol.max_active_decoys} decoys, ${pol.max_replicas} replicas each. Decoys have no egress and only accept lab namespaces.</p>`;
-  $("decDecoys").innerHTML = table([
+  $("decDecoys").html = table([
     { h: "Decoy", f: r => `<span class="mono">${esc(r.name)}</span>` }, { h: "Status", f: r => pill(r.status, r.status === "expired" || r.status === "removed" ? "idle" : r.status) },
     { h: "Deployed", f: r => time(r.created_at) }, { h: "Ready after", num: 1, f: r => r.deploy_seconds == null ? "—" : fmt(r.deploy_seconds, 1) + " s" },
     { h: "Replicas", num: 1, k: "replicas" }, { h: "Decision", num: 1, f: r => r.decision_id ? "#" + r.decision_id : "—" }, { h: "Expires", f: r => time(r.expires_at) },
     { h: "Deactivated", f: r => r.removed_at ? time(r.removed_at) : "—" }, { h: "Error", wrap: 1, f: r => esc(r.error || "") },
   ], decoys, { emptyTitle: "No decoys yet" });
-  $("decDecisions").innerHTML = table([
+  $("decDecisions").html = table([
     { h: "#", num: 1, k: "id" }, { h: "Time", f: r => time(r.created_at) }, { h: "Trigger", k: "trigger" }, { h: "Threat", f: r => r.attack_class ? (CLASS_COLORS[r.attack_class] ? clsTag(r.attack_class) : esc(r.attack_class)) : "—" },
     { h: "Source", f: r => `<span class="mono">${esc(r.src_ip || "—")}</span>` }, { h: "Action", f: r => `<b>${esc(r.action)}</b> ${esc(r.decoy_name || "")}` },
     { h: "Result", f: r => pill(r.result || "—", r.result === "ok" ? "ok" : r.result === "failed" ? "error" : "idle") }, { h: "Reason", wrap: 1, k: "reason" },
   ], dec, { emptyTitle: "No decisions yet", emptyBody: "Decisions appear once evidence arrives while deception is enabled." });
-  $("decInteractions").innerHTML = table([
+  $("decInteractions").html = table([
     { h: "Time", f: r => time(r.ts) }, { h: "Decoy", f: r => `<span class="mono">${esc(r.decoy_name)}</span>` }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>` },
     { h: "Request", f: r => `<span class="mono">${esc(r.method)} ${esc(r.path)}${r.query ? "?" + esc(r.query) : ""}</span>` }, { h: "Status", num: 1, k: "status" },
     { h: "Type", k: "interaction_type" }, { h: "User agent", f: r => esc((r.user_agent || "").slice(0, 40)) },
@@ -915,7 +1013,7 @@ async function pageK8s() {
 async function pageModel(full) {
   if (!S.model || full) S.model = await api("/api/model");
   const md = S.model, m = md.models[md.best_model];
-  $("mdKpis").innerHTML = [
+  $("mdKpis").html = [
     kpi("Model", esc(md.best_model), `${esc(md.name)} · ${esc(md.training_status)}`, "ok"), kpi("Version", `<span class="mono" style="font-size:16px">${esc(md.version.sha256)}</span>`, `${esc(md.version.modified)} · ${md.version.size_mb} MB`),
     kpi("Training samples", fmt(md.train_samples), `${fmt(md.test_samples)} test samples`), kpi("Features", fmt(md.n_features), "flow statistics only (no IPs, ports, timestamps)"),
     kpi("Accuracy", pct(m.accuracy, 2), "held-out test split"), kpi("Macro F1", fmt(m.macro_f1, 4), `weighted F1 ${fmt(m.weighted_f1, 4)}`),
@@ -923,7 +1021,7 @@ async function pageModel(full) {
   ].join("");
   const per = Object.entries(m.per_class).map(([c, v]) => Object.assign({ c }, v));
   const macroP = per.reduce((a, r) => a + r.precision, 0) / per.length, macroR = per.reduce((a, r) => a + r.recall, 0) / per.length;
-  $("mdPerClass").innerHTML = table([{ h: "Class", f: r => clsTag(r.c) }, { h: "Precision", num: 1, f: r => fmt(r.precision, 4) }, { h: "Recall", num: 1, f: r => fmt(r.recall, 4) },
+  $("mdPerClass").html = table([{ h: "Class", f: r => clsTag(r.c) }, { h: "Precision", num: 1, f: r => fmt(r.precision, 4) }, { h: "Recall", num: 1, f: r => fmt(r.recall, 4) },
     { h: "F1", num: 1, f: r => fmt(r.f1, 4) }, { h: "Test support", num: 1, f: r => fmt(r.support) }], per, { maxH: "320px" }) +
     `<p class="hint" style="margin-top:8px">Macro precision ${fmt(macroP, 4)} · macro recall ${fmt(macroR, 4)}. ${md.source ? "Test set: whole capture sessions held out from training (other targets and rates)." : "Bot is the weakest class (few training flows): treat Bot alerts with care."}</p>`;
   const tr = (md.split_counts || {}).train || {}, cls = md.classes;
@@ -934,7 +1032,7 @@ async function pageModel(full) {
     text: cm.map(r => r.map(v => fmt(v))), texttemplate: "%{text}", textfont: { size: 11, color: cssVar("--text") }, hovertemplate: "true %{y} → predicted %{x}<br>%{customdata:,} flows (%{z:.1%} of row)<extra></extra>" }],
     { margin: { l: 90, r: 10, t: 8, b: 80 }, yaxis: { autorange: "reversed", tickfont: { color: cssVar("--muted") } }, xaxis: { tickfont: { color: cssVar("--muted") } } });
   const ds = md.dataset;
-  $("mdDataset").innerHTML = ds ? `<dl class="kv"><dt>Source</dt><dd>CIC-IDS2017 (merged CSVs)${md.name.endsWith("lab") ? " + verified benign flows captured in the K3s lab" : ""}</dd>
+  $("mdDataset").html = ds ? `<dl class="kv"><dt>Source</dt><dd>CIC-IDS2017 (merged CSVs)${md.name.endsWith("lab") ? " + verified benign flows captured in the K3s lab" : ""}</dd>
     <dt>Rows loaded</dt><dd>${fmt(ds.rows_loaded)}</dd><dt>Duplicates dropped</dt><dd>${fmt(ds.duplicate_rows_dropped)}</dd><dt>Conflicting rows dropped</dt><dd>${fmt(ds.conflicting_rows_dropped)}</dd>
     <dt>NaN / inf rows dropped</dt><dd>${fmt(ds.rows_with_nan_or_inf_dropped)}</dd><dt>Rare labels dropped</dt><dd>${fmt(ds.dropped_rare_labels)} rows (Infiltration, Heartbleed)</dd>
     <dt>Final rows</dt><dd>${fmt(ds.final_rows)}</dd><dt>Constant columns dropped</dt><dd class="mono">${esc((ds.constant_columns_dropped || []).join(", "))}</dd></dl>
@@ -949,9 +1047,9 @@ async function pageSystem(full) {
   if ($("logSearch").value.trim()) q.set("search", $("logSearch").value.trim());
   const [h, res, logs, req, caps] = await Promise.all([api("/api/system/health"), api("/api/system/resources"), api("/api/system/logs?" + q), api("/api/system/requests?limit=150"), api("/api/live/captures?limit=100")]);
   $("sysChecked").textContent = `Overall ${h.status} · checked ${time(h.checked_at)}`;
-  $("sysHealth").innerHTML = table([{ h: "Component", f: r => `<b>${esc(r.component.replace("_", " "))}</b>` }, { h: "Status", f: r => pill(r.status, r.status) }, { h: "Detail", wrap: 1, f: r => esc(r.detail || "") }, { h: "Check", num: 1, f: r => fmt(r.ms, 0) + " ms" }], h.components, { maxH: "none" });
+  $("sysHealth").html = table([{ h: "Component", f: r => `<b>${esc(r.component.replace("_", " "))}</b>` }, { h: "Status", f: r => pill(r.status, r.status) }, { h: "Detail", wrap: 1, f: r => esc(r.detail || "") }, { h: "Check", num: 1, f: r => fmt(r.ms, 0) + " ms" }], h.components, { maxH: "none" });
   const b = res.backend, c = res.capture_service;
-  $("sysRes").innerHTML = [
+  $("sysRes").html = [
     kpi("Backend process", b ? fmt(b.rss_mb, 0) + " MiB" : NA, b ? `CPU ${b.cpu_percent === null ? "— (next refresh)" : b.cpu_percent + "%"} · pid ${b.pid}` : ""),
     kpi("Capture service", c ? fmt(c.rss_mb, 0) + " MiB" : NA, c ? `CPU ${c.cpu_percent === null ? "—" : c.cpu_percent + "%"} · pid ${c.pid}` : "not running"),
     kpi("Host memory", res.host ? fmt(res.host.memory_percent, 0) + "%" : NA, res.host ? `${fmt(res.host.memory_used_mb)} / ${fmt(res.host.memory_total_mb)} MiB · load ${res.host.load_1m}` : ""),
@@ -959,16 +1057,16 @@ async function pageSystem(full) {
     kpi("Errors / warnings in logs", `${fmt(logs.counts.ERROR || 0)} / ${fmt(logs.counts.WARNING || 0)}`, "in the last 4000 lines", logs.counts.ERROR ? "error" : "ok"),
     kpi("API responses", Object.entries(req.by_status).map(([k, v]) => `${k} ${v}`).join(" · ") || NA, `last ${req.kept} requests`, (req.by_status["5xx"] || 0) ? "error" : "ok"),
   ].join("");
-  $("sysLogs").innerHTML = table([{ h: "Time", f: r => esc((r.ts || "").slice(11, 19)) }, { h: "Level", f: r => `<span class="lvl-${r.level}">${esc(r.level)}</span>` }, { h: "Component", k: "component" },
+  $("sysLogs").html = table([{ h: "Time", f: r => esc((r.ts || "").slice(11, 19)) }, { h: "Level", f: r => `<span class="lvl-${r.level}">${esc(r.level)}</span>` }, { h: "Component", k: "component" },
     { h: "Message", wrap: 1, f: r => `<pre class="log">${esc(r.message)}</pre>` }], logs.records, { emptyTitle: "No log lines match", maxH: "420px" });
-  $("sysReq").innerHTML = table([{ h: "Time", f: r => esc(r.ts.slice(11)) }, { h: "Method", k: "method" }, { h: "Path", f: r => `<span class="mono">${esc(r.path)}</span>` },
+  $("sysReq").html = table([{ h: "Time", f: r => esc(r.ts.slice(11)) }, { h: "Method", k: "method" }, { h: "Path", f: r => `<span class="mono">${esc(r.path)}</span>` },
     { h: "Status", f: r => pill(String(r.status), r.status >= 500 ? "error" : r.status >= 400 ? "degraded" : "ok") }, { h: "ms", num: 1, f: r => fmt(r.ms, 0) }], req.requests, { maxH: "360px" });
-  $("sysCaps").innerHTML = table([{ h: "PCAP", f: r => `<span class="mono">${esc(r.pcap_file.slice(-32))}</span>` }, { h: "Status", f: r => pill(r.status, r.status === "classified" ? "ok" : r.status === "failed" ? "error" : "idle") },
+  $("sysCaps").html = table([{ h: "PCAP", f: r => `<span class="mono">${esc(r.pcap_file.slice(-32))}</span>` }, { h: "Status", f: r => pill(r.status, r.status === "classified" ? "ok" : r.status === "failed" ? "error" : "idle") },
     { h: "Packets", num: 1, f: r => fmt(r.packets) }, { h: "Size", num: 1, f: r => fmt((r.bytes || 0) / 1024, 1) + " KB" }, { h: "Duration", num: 1, f: r => fmt(r.duration_s, 1) + " s" },
     { h: "Flows", num: 1, f: r => fmt(r.flows) }, { h: "Error", wrap: 1, f: r => esc(r.error || "") }], caps, { maxH: "360px", emptyTitle: "No captures yet" });
   if (full || S.slow % 3 === 0 || !S.k8s) S.k8s = await api("/api/kubernetes/status").catch(e => ({ connected: false, error: e.message }));
   const evs = S.k8s.connected ? Object.entries(S.k8s.namespaces).flatMap(([ns, e]) => (e.events || []).map(x => Object.assign({ ns }, x))).sort((a, b) => b.time.localeCompare(a.time)) : [];
-  $("sysEvents").innerHTML = S.k8s.connected ? table([{ h: "Time", f: r => esc(r.time.slice(11, 19)) }, { h: "Namespace", k: "ns" }, { h: "Type", f: r => pill(r.type, r.type === "Warning" ? "degraded" : "ok") }, { h: "Reason", k: "reason" }, { h: "Object", k: "object" }, { h: "Message", wrap: 1, k: "message" }], evs.slice(0, 80), { maxH: "360px" }) : errBox("Kubernetes unreachable: " + S.k8s.error);
+  $("sysEvents").html = S.k8s.connected ? table([{ h: "Time", f: r => esc(r.time.slice(11, 19)) }, { h: "Namespace", k: "ns" }, { h: "Type", f: r => pill(r.type, r.type === "Warning" ? "degraded" : "ok") }, { h: "Reason", k: "reason" }, { h: "Object", k: "object" }, { h: "Message", wrap: 1, k: "message" }], evs.slice(0, 80), { maxH: "360px" }) : errBox("Kubernetes unreachable: " + S.k8s.error);
 }
 
 /* ---------------- router & refresh ---------------- */
@@ -1002,7 +1100,7 @@ function go(page, push = true) {
 function tick() {
   clearTimeout(S.timer);
   S.timer = setTimeout(async () => {
-    if (!S.paused && !document.hidden) { S.slow++; if (!STATIC[S.page]) await refresh(); if (S.slow % 3 === 0) loadChrome(); }
+    if (!S.paused && !document.hidden) { S.slow++; if (!STATIC[S.page]) await refresh(); loadThreatCounter(); if (S.slow % 3 === 0) loadChrome(); }
     tick();
   }, CFG.refreshMs);
 }
@@ -1058,7 +1156,7 @@ $("decCycle").onclick = e => act(e.currentTarget, () => api("/api/deception/cycl
 $("decDeploy").onclick = e => act(e.currentTarget, () => api("/api/deception/decoys", { method: "POST", body: { profile: $("decProfile").value } }), r => `${r.name} created; it shows Active once its pod is ready`);
 
 window.addEventListener("hashchange", () => { const h = location.hash.slice(1); if (h && h !== S.page) go(h, false); });
-loadChrome();
+loadChrome(); loadThreatCounter();
 go((location.hash || "#overview").slice(1), false);
 tick();
 </script>

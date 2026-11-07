@@ -138,7 +138,10 @@ _MIGRATIONS = {"captures": {"window_s": "REAL", "session_id": "INTEGER"},
                "behavior_alerts": {"distinct_ports": "INTEGER", "session_id": "INTEGER", "dismissed_at": "TEXT"},
                "detections": {"flow_duration_us": "REAL", "packets": "INTEGER", "bytes": "INTEGER",
                               "allowlisted": "TEXT", "lab_scenario": "TEXT", "lab_job": "TEXT",
-                              "session_id": "INTEGER"}}
+                              "session_id": "INTEGER"},
+               # node-specific deception: the attacked pod / node, the attacker pod, decoy pod IPs
+               "engagements": {"target": "TEXT", "attacker": "TEXT", "node": "TEXT"},
+               "decoys": {"node": "TEXT", "pod_ips": "TEXT"}}
 
 
 def _migrate(conn: sqlite3.Connection) -> None:

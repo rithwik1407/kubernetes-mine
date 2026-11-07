@@ -78,7 +78,7 @@ def test_aggregated_portscan_deploys_decoy(cfg):
 class FakeRedirector:
     def __init__(self):
         self.calls = []
-    def quarantine(self, ip, cfg, redirect_to=None):
+    def quarantine(self, ip, cfg, redirect_to=None, only=None):
         self.calls.append((ip, redirect_to))
         return {"applied": True, "namespace": "ids-traffic", "pod": "p", "label": "l", "to": redirect_to,
                 "reason": f"redirected to {redirect_to}"}

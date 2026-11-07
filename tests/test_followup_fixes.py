@@ -298,3 +298,104 @@ def test_allowlist_discovers_node_bridge_for_kubelet_probes(monkeypatch):
     a = al.Allowlist(ips=ips)
     assert a.reason("10.42.0.1", "10.42.0.157", 50320, 8081)      # probe to a decoy: never an attack
     assert a.reason("10.42.0.156", "10.42.0.138", 40000, 8086) is None
+
+
+# --- node-specific deception, threat counter ---------------------------------------
+def test_generator_redirects_only_connections_to_the_attacked_pod(tmp_path, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    f = tmp_path / "annotations"
+    f.write_text('ids-deception/redirect-to="decoy-web-portal-vm.ids-deception.svc.cluster.local:80"\n'
+                 'ids-deception/redirect-only="10.42.0.138,influxdb,influxdb.target-apps.svc.cluster.local,10.43.0.20"\n')
+    monkeypatch.setenv("REDIRECT_FILE", str(f))
+    src = Path(__file__).resolve().parents[1] / "deploy" / "traffic-lab" / "traffic_generator.py"
+    spec = importlib.util.spec_from_file_location("tg_only", src)
+    g = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(g)
+    monkeypatch.setattr(g.socket, "gethostbyname", lambda h: {"grafana.target-apps.svc.cluster.local": "10.43.0.30"}.get(h, "0.0.0.0"))
+    decoy = ("decoy-web-portal-vm.ids-deception.svc.cluster.local", 80)
+    assert g.aim("influxdb.target-apps.svc.cluster.local", 8086) == decoy          # the attacked pod
+    assert g.aim("10.42.0.138", 8086) == decoy
+    assert g.aim("grafana.target-apps.svc.cluster.local", 3000) == ("grafana.target-apps.svc.cluster.local", 3000)
+    assert g.aim_url("http://grafana.target-apps.svc.cluster.local:3000") == "http://grafana.target-apps.svc.cluster.local:3000"
+
+
+def test_decoy_is_rendered_on_the_attacked_node(cfg, monkeypatch):
+    from live import k8s_decoys
+    assert k8s_decoys.decoy_name("web-portal", "worker-2.lab") == "decoy-web-portal-worker-2-lab"
+    assert k8s_decoys.decoy_name("web-portal") == "decoy-web-portal"
+    m = k8s_decoys.DecoyManager.__new__(k8s_decoys.DecoyManager)
+    d = cfg["deception"]
+    m.profiles, m.max_replicas = d["profiles"], int(d["max_replicas"])
+    m.template = (Path(__file__).resolve().parents[1] / d["template"]).read_text()
+    dep, svc = m.render("web-portal", 1, "worker-2.lab")
+    assert dep["metadata"]["name"] == svc["metadata"]["name"] == "decoy-web-portal-worker-2-lab"
+    assert dep["spec"]["template"]["spec"]["nodeSelector"] == {"kubernetes.io/hostname": "worker-2.lab"}
+    dep, _ = m.render("web-portal", 1)
+    assert "nodeSelector" not in dep["spec"]["template"]["spec"]
+
+
+def test_engagement_targets_the_attacked_pod_and_its_node(cfg, monkeypatch):
+    from live import podinfo
+    from live.controller import MapeKController
+    pods = podinfo.build(
+        [NS(metadata=NS(name="influxdb-1", namespace="target-apps", labels={"app": "influxdb"}, creation_timestamp=None),
+            spec=NS(node_name="worker-2"), status=NS(pod_ip="10.43.0.5", phase="Running")),
+         NS(metadata=NS(name="traffic-port-scan-x", namespace="ids-traffic", labels={"app": "traffic-lab"}, creation_timestamp=None),
+            spec=NS(node_name="worker-1"), status=NS(pod_ip="10.42.0.9", phase="Running"))],
+        [NS(metadata=NS(name="influxdb", namespace="target-apps"),
+            spec=NS(selector={"app": "influxdb"}, cluster_ip="10.43.9.9", ports=[NS(port=8086)]))])
+    podinfo._CACHE.update(at=float("inf"), value=pods, error=None)
+
+    class Mgr:
+        def __init__(self): self.calls = []
+        def deploy(self, profile, replicas, node=None):
+            self.calls.append((profile, node)); return {"port": 80, "service_ip": "10.0.0.1"}
+        def list_decoys(self): return {}
+        def interaction_lines(self, name, since): return []
+        def remove(self, name): return True
+
+    class Red:
+        def __init__(self): self.only = None
+        def quarantine(self, ip, cfg, redirect_to=None, only=None):
+            self.only = only; return {"applied": True, "namespace": "ids-traffic", "pod": "p", "to": redirect_to, "reason": "ok"}
+
+    mgr, red = Mgr(), Red()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.redirector = red
+    ctl.set_enabled(True)
+    with db.connect(cfg["paths"]["database"]) as c:
+        for _ in range(ctl.class_policy("PortScan")["min_flows"]):
+            db.insert_row(c, "detections", predicted_class="PortScan", confidence=0.99, is_malicious=1, source="live",
+                          detected_at=datetime.now(timezone.utc).isoformat(), src_ip="10.42.0.9", dst_ip="10.43.0.5",
+                          dst_port=8086, protocol=6, model="m")
+    ctl.run_cycle()
+    e = ctl.engagements()[0]
+    assert e["node"] == "worker-2" and e["target"]["pod"] == "influxdb-1" and e["attacker"]["node"] == "worker-1"
+    assert mgr.calls and all(n == "worker-2" for _, n in mgr.calls)          # decoys on the attacked node
+    assert all(n.endswith("-worker-2") for n in e["decoys"])
+    # decoy becomes Ready -> redirect limited to the attacked pod and its Service
+    mgr.list_decoys = lambda: {n: {"ready_replicas": 1, "endpoints": 1} for n in e["decoys"]}
+    ctl.run_cycle()
+    assert set(red.only) >= {"10.43.0.5", "influxdb", "influxdb.target-apps.svc.cluster.local", "10.43.9.9"}
+    det = ctl.engagement_details()["engagements"][0]
+    assert det["traffic"]["decoy_flows"] == 0 and det["target"]["node"] == "worker-2"
+
+
+def test_threat_counter_shows_current_run_then_clears(cfg):
+    now = datetime.now(timezone.utc)
+    with db.connect(cfg["paths"]["database"]) as c:
+        for cls, sess, mal in (("PortScan", 1, 1), ("PortScan", 2, 1), ("WebAttack", 2, 1), ("BENIGN", 2, 0)):
+            db.insert_row(c, "detections", predicted_class=cls, confidence=0.9, is_malicious=mal, source="live",
+                          detected_at=now.isoformat(), session_id=sess, src_ip="10.42.0.9", model="m")
+        run = {"id": "r2", "started_at": (now - timedelta(seconds=30)).isoformat(), "scenario": "port_scan",
+               "session_id": 2, "auto_stop": {"enabled": True, "state": "waiting for Jobs"}, "jobs": []}
+        db.kv_set(c, "pipeline_runs", json.dumps([run]))
+    t = queries.threat_counter(cfg)
+    assert t["run"]["malicious"] == 2 and t["run"]["by_class"] == {"PortScan": 1, "WebAttack": 1}
+    assert t["total"]["malicious"] == 3 and t["total"]["by_class"]["PortScan"] == 2
+    run["auto_stop"] = {"enabled": True, "state": "stopped"}
+    with db.connect(cfg["paths"]["database"]) as c:
+        db.kv_set(c, "pipeline_runs", json.dumps([run]))
+    t = queries.threat_counter(cfg)
+    assert t["run"] is None and t["total"]["malicious"] == 3

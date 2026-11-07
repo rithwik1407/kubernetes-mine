@@ -67,7 +67,11 @@ _NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exha
 # needs root on the node, which the lab does not have.
 REDIRECT_FILE = os.environ.get("REDIRECT_FILE", "")
 REDIRECT_KEY = "ids-deception/redirect-to"
-_REDIRECT = {"checked": 0.0, "to": None}
+# Node-specific deception: only connections to these hosts (the attacked pod's IP, its
+# Service names and ClusterIPs) are redirected. Empty = every connection (older controller).
+ONLY_KEY = "ids-deception/redirect-only"
+_REDIRECT = {"checked": 0.0, "to": None, "only": frozenset()}
+_RESOLVED: dict[str, str | None] = {}
 
 
 def emit(**fields) -> None:
@@ -94,32 +98,49 @@ def redirect_target() -> tuple[str, int] | None:
     if not REDIRECT_FILE or time.monotonic() - _REDIRECT["checked"] < 1.0:
         return _REDIRECT["to"]
     _REDIRECT["checked"] = time.monotonic()
-    to = None
+    to, only = None, frozenset()
     try:
         with open(REDIRECT_FILE, encoding="utf-8") as f:
             for line in f:
                 key, _, val = line.strip().partition("=")
                 if key == REDIRECT_KEY and val.strip('"'):
                     to = host_port(val.strip('"'), 80)
+                elif key == ONLY_KEY and val.strip('"'):
+                    only = frozenset(h.strip() for h in val.strip('"').split(",") if h.strip())
     except (OSError, ValueError):
-        to = None
-    if to != _REDIRECT["to"]:
-        emit(action="redirected", to=f"{to[0]}:{to[1]}" if to else None,
-             note="deception redirect: new connections go to the decoy" if to else "redirect removed")
-        _REDIRECT["to"] = to
+        to, only = None, frozenset()
+    if to != _REDIRECT["to"] or only != _REDIRECT["only"]:
+        emit(action="redirected", to=f"{to[0]}:{to[1]}" if to else None, only=sorted(only) or None,
+             note=("deception redirect: new connections" + (" to the attacked pod" if only else "")
+                   + " go to the decoy") if to else "redirect removed")
+        _REDIRECT["to"], _REDIRECT["only"] = to, only
     return to
+
+
+def _redirected(host: str) -> bool:
+    """True when a connection to host must go to the decoy (it is the attacked pod)."""
+    only = _REDIRECT["only"]
+    if not only or host in only:
+        return True
+    if host not in _RESOLVED:
+        try:
+            _RESOLVED[host] = socket.gethostbyname(host)
+        except OSError:
+            _RESOLVED[host] = None
+    return _RESOLVED[host] in only
 
 
 def aim(host: str, port: int) -> tuple[str, int]:
     """Where a new connection to host:port actually goes (the decoy while redirected)."""
-    return redirect_target() or (host, port)
+    to = redirect_target()
+    return to if to and _redirected(host) else (host, port)
 
 
 def aim_url(url: str) -> str:
     to = redirect_target()
-    if not to:
-        return url
     parts = urllib.parse.urlsplit(url)
+    if not to or not _redirected(parts.hostname or ""):
+        return url
     return urllib.parse.urlunsplit((parts.scheme, f"{to[0]}:{to[1]}", parts.path, parts.query, parts.fragment))
 
 

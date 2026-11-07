@@ -21,7 +21,7 @@ from __future__ import annotations
 import json
 import threading
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -213,7 +213,10 @@ class MapeKController:
                         "mean_confidence": round(mean, 4), "window_seconds": pol["window_seconds"],
                         "max_confidence_new": round(max(r["confidence"] for r in rows), 4),
                         "targets": sorted({f"{x['dst_ip']}:{x['dst_port']}" for x in agg[:30]})[:5], "policy": pol}
-            out.append(self._assess_aggregate("ml", src, cls, n, mean, pol, evidence, simulated=False))
+            a = self._assess_aggregate("ml", src, cls, n, mean, pol, evidence, simulated=False)
+            dsts = Counter(x["dst_ip"] for x in agg if x["dst_ip"])
+            a["target_ip"] = dsts.most_common(1)[0][0] if dsts else None     # the pod the attack hits most
+            out.append(a)
 
         for e in ev["simulated"]:
             pol = self.class_policy(e["attack_class"])
@@ -232,7 +235,7 @@ class MapeKController:
                 out.append({
                     "trigger": "behavior", "src_ip": src, "attack_class": "Reconnaissance (port sweep)",
                     "assessment": "high", "max_confidence": None, "evidence_count": max(windows, len(rows)),
-                    "actionable": True, "target_port": "sweep", "simulated": False,
+                    "actionable": True, "target_port": "sweep", "simulated": False, "target_ip": a["dst_ip"],
                     "reason": (f"port sweep: {a.get('distinct_ports')} distinct ports of {a['dst_ip']} in "
                                f"{a['window_s']:.0f}s from {src} (threshold {self.cfg['behavior'].get('sweep_min_ports', 10)})"),
                     "evidence": {"behavior_alert_ids": [r["id"] for r in rows],
@@ -242,7 +245,7 @@ class MapeKController:
             out.append({
                 "trigger": "behavior", "src_ip": src, "attack_class": "Reconnaissance (flow burst)",
                 "assessment": "high", "max_confidence": None, "evidence_count": max(windows, len(rows)),
-                "actionable": True, "target_port": port, "simulated": False,
+                "actionable": True, "target_port": port, "simulated": False, "target_ip": a["dst_ip"],
                 "reason": (f"flow burst: {a['flows']} flows in {a['window_s']:.0f}s ({a['rate_per_s']}/s) from "
                            f"{src} to {a['dst_ip']}:{port} (threshold {self.cfg['behavior']['min_flows']}); "
                            f"{max(windows, len(rows))} burst window(s) in {th['repeat_window_seconds']}s"),
@@ -299,7 +302,8 @@ class MapeKController:
             if a["actionable"]:
                 if eng:
                     db.update_row(c, "engagements", eng["id"], last_evidence_at=iso(now))
-                    a = {**a, "engagement_id": eng["id"], "reason": a["reason"] + f"; source already engaged (#{eng['id']})"}
+                    a = {**a, "engagement_id": eng["id"], "target_node": eng["node"],
+                         "reason": a["reason"] + f"; source already engaged (#{eng['id']})"}
                 else:
                     last = parse(c.execute("SELECT MAX(released_at) FROM engagements WHERE src_ip = ?", (src,)).fetchone()[0])
                     wait = float(hyst.get("reengage_cooldown_seconds", 120))
@@ -312,14 +316,24 @@ class MapeKController:
                         # (_apply_redirects); until then its traffic still reaches the real service.
                         rd = {"applied": False, "pending": True, "reason": "waiting for a Ready decoy"}
                         scen = self.scenario_of(src)
+                        # Node-specific deception: the pod the attack hits and its node. The decoy
+                        # is placed on that node and only traffic aimed at that pod is redirected.
+                        target, attacker = self.pod_of(a.get("target_ip")), self.pod_of(src)
+                        node = (target or {}).get("node")
                         eid = db.insert_row(c, "engagements", src_ip=src, attack_class=a["attack_class"],
                                             trigger=a["trigger"], state="active", started_at=iso(now),
                                             last_evidence_at=iso(now), decoys="[]", redirect=json.dumps(rd),
-                                            reason=a["reason"])
+                                            reason=a["reason"], node=node,
+                                            target=json.dumps(target or {"ip": a.get("target_ip")}),
+                                            attacker=json.dumps(attacker or {"ip": src}))
+                        where = (f"target {target['namespace']}/{target['pod']} ({target['ip']}) on node {node}"
+                                 if target else f"target {a.get('target_ip') or 'unknown'} is not a lab pod: "
+                                                "decoy placed by the scheduler, all of the source's traffic redirected")
+                        a = {**a, "target_node": node}
                         self._record(c, cycle_id, trigger=a["trigger"], src_ip=src, attack_class=a["attack_class"],
                                      assessment=a["assessment"], max_confidence=a.get("max_confidence"),
                                      evidence_count=a.get("evidence_count"), action="engage", result="ok",
-                                     reason=f"engagement #{eid} opened for {src} (scenario {scen}): {a['reason']}. "
+                                     reason=f"engagement #{eid} opened for {src} (scenario {scen}), {where}: {a['reason']}. "
                                             f"The source is redirected to its decoy as soon as the decoy is Ready",
                                      evidence={**(a.get("evidence") or {}), "engagement_id": eid})
                         a = {**a, "engagement_id": eid}
@@ -335,6 +349,12 @@ class MapeKController:
         from live import labsources
         hit = labsources.get(self.cfg).get(str(ip)) if ip else None
         return f"{hit['scenario']} ({hit['job']})" if hit else "UNKNOWN"
+
+    def pod_of(self, ip: str | None) -> dict[str, Any] | None:
+        """{pod, namespace, node, ip, services} of a lab pod, or None."""
+        from live import podinfo
+        hit = podinfo.lookup(ip, self.cfg)
+        return {k: hit[k] for k in ("pod", "namespace", "node", "ip", "services")} if hit else None
 
     def decoy_ips(self) -> set[str]:
         from live import labsources
@@ -363,9 +383,15 @@ class MapeKController:
                 continue
             d = min(ready, key=lambda r: names.index(r["name"]))   # the policy's preferred decoy
             to = f"{d['name']}.{ns}.svc.cluster.local:{d['port']}"
-            new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to) if self.redirector else \
-                {"applied": False, "reason": "redirect not configured"}
+            target = json.loads(e.get("target") or "{}")
+            only = sorted({h for s in target.get("services") or [] for h in s.get("hosts", [])}
+                          | ({target["ip"]} if target.get("pod") and target.get("ip") else set()))
+            new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None) \
+                if self.redirector else {"applied": False, "reason": "redirect not configured"}
             new["decoy"] = d["name"]
+            new["decoy_node"] = d.get("node")
+            new["at"] = iso(now_utc())
+            new["only"] = only
             db.update_row(c, "engagements", e["id"], redirect=json.dumps(new))
             self._record(c, cycle_id, trigger="engagement", src_ip=e["src_ip"], attack_class=e["attack_class"],
                          action="redirect", decoy_profile=d["profile"], decoy_name=d["name"],
@@ -419,7 +445,58 @@ class MapeKController:
         for r in rows:
             r["decoys"] = json.loads(r["decoys"] or "[]")
             r["redirect"] = json.loads(r["redirect"] or "{}")
+            r["target"] = json.loads(r.get("target") or "null")
+            r["attacker"] = json.loads(r.get("attacker") or "null")
         return rows
+
+    def engagement_details(self, limit: int = 20) -> dict[str, Any]:
+        """Engagements with the attacker -> target -> decoy path and the traffic that reached
+        the decoy, counted from captured flows (attacker <-> decoy pod IPs) and decoy logs."""
+        rows = self.engagements(limit)
+        pods, pods_error = [], None
+        mgr = self.manager
+        if mgr is not None and hasattr(mgr, "decoy_pods"):
+            try:
+                pods = mgr.decoy_pods()
+            except Exception as e:  # noqa: BLE001
+                pods_error = str(e)[:300]
+        with self._conn() as c:
+            for r in rows:
+                names = r["decoys"]
+                drows = [dict(x) for x in c.execute(
+                    f"SELECT name, node, pod_ips, status, created_at, ready_at, removed_at, service_ip, port FROM decoys "
+                    f"WHERE name IN ({','.join('?' * len(names))}) AND (removed_at IS NULL OR removed_at >= ?) ORDER BY id",
+                    (*names, r["started_at"]))] if names else []
+                ips = {p["ip"] for p in pods if p.get("decoy") in names and p.get("ip")}
+                for d in drows:
+                    ips |= set(json.loads(d.pop("pod_ips") or "[]"))
+                r["decoy_rows"] = drows
+                r["decoy_pods"] = [p for p in pods if p.get("decoy") in names]
+                r["decoy_pod_ips"] = sorted(ips)
+                src, since = r["src_ip"], r["started_at"]
+                ph = ",".join("?" * len(ips))
+                to_decoy = c.execute(
+                    f"SELECT COUNT(*) n, COALESCE(SUM(packets),0) pk, COALESCE(SUM(bytes),0) b, MAX(detected_at) last "
+                    f"FROM detections WHERE detected_at >= ? AND ((src_ip = ? AND dst_ip IN ({ph})) OR "
+                    f"(dst_ip = ? AND src_ip IN ({ph})))", (since, src, *ips, src, *ips)).fetchone() if ips else None
+                t_ip = (r["target"] or {}).get("ip")
+                # by flow start time (UTC, no zone in CICFlowMeter output): flows that began after the
+                # redirect, not flows already in flight that were scored a few seconds later
+                t0 = str(r["redirect"].get("at") or since)[:26]
+                to_target = c.execute(
+                    "SELECT COUNT(*) n, COALESCE(SUM(packets),0) pk FROM detections WHERE timestamp >= ? AND "
+                    "detected_at >= ? AND ((src_ip = ? AND dst_ip = ?) OR (src_ip = ? AND dst_ip = ?))",
+                    (t0, since, src, t_ip, t_ip, src)).fetchone() if t_ip else None
+                req = c.execute("SELECT COUNT(*) n, MAX(ts) last FROM interactions WHERE src_ip = ? AND ts >= ?",
+                                (src, since)).fetchone()
+                r["traffic"] = {
+                    "decoy_flows": to_decoy["n"] if to_decoy else 0, "decoy_packets": to_decoy["pk"] if to_decoy else 0,
+                    "decoy_bytes": to_decoy["b"] if to_decoy else 0, "decoy_last_flow": to_decoy["last"] if to_decoy else None,
+                    "decoy_requests": req["n"], "decoy_last_request": req["last"],
+                    "target_flows_since_redirect": to_target["n"] if to_target else None,
+                    "target_packets_since_redirect": to_target["pk"] if to_target else None,
+                }
+        return {"engagements": rows, "decoy_pods": pods, "decoy_pods_error": pods_error}
 
     # --- Plan -----------------------------------------------------------------------
     def _profiles_for(self, c, a: dict[str, Any]) -> list[str]:
@@ -446,8 +523,8 @@ class MapeKController:
                                 "profile": None})
                 continue
             for profile in self._profiles_for(c, a):
-                name = decoy_name(profile)
-                act = {**a, "profile": profile, "name": name}
+                name = decoy_name(profile, a.get("target_node"))
+                act = {**a, "profile": profile, "name": name, "node": a.get("target_node")}
                 if name in planned:
                     # another source in this cycle already asked for this decoy: share it
                     self._link_decoy(c, a.get("engagement_id"), name)
@@ -484,25 +561,26 @@ class MapeKController:
         return bool(t and (now - t).total_seconds() < self.d["redeploy_cooldown_seconds"])
 
     # --- Execute --------------------------------------------------------------------
-    def _deploy(self, c, profile: str, decision_id: int, detection_id=None, simulated=False) -> tuple[str, str | None]:
+    def _deploy(self, c, profile: str, decision_id: int, detection_id=None, simulated=False,
+                node: str | None = None) -> tuple[str, str | None]:
         mgr = self.manager
         if mgr is None:
             return "failed", f"Kubernetes unavailable: {self.manager_error}"
-        name = decoy_name(profile)
+        name = decoy_name(profile, node)
         t = now_utc()
         try:
-            info = mgr.deploy(profile, 1)
+            info = mgr.deploy(profile, 1, node=node) if node else mgr.deploy(profile, 1)
         except DecoyError as e:
             db.insert_row(c, "decoys", name=name, profile=profile, namespace=self.d["namespace"], status="failed",
                           created_at=iso(t), removed_at=iso(t), decision_id=decision_id, simulated=int(simulated),
-                          error=str(e))
+                          error=str(e), node=node)
             return "failed", str(e)
         log.info("decoy %s deployed (profile %s, service %s:%s), waiting for readiness", name, profile,
                  info["service_ip"], info["port"])
         db.insert_row(c, "decoys", name=name, profile=profile, namespace=self.d["namespace"], status="deploying",
                       replicas=1, port=info["port"], service_ip=info["service_ip"], created_at=iso(t),
                       expires_at=iso(t + timedelta(seconds=self.d["decoy_ttl_seconds"])), decision_id=decision_id,
-                      detection_id=detection_id, simulated=int(simulated))
+                      detection_id=detection_id, simulated=int(simulated), node=node)
         return "ok", None
 
     def execute(self, c, cycle_id: int, actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -515,7 +593,7 @@ class MapeKController:
             result, error = "skipped", None
             if a["action"] == "deploy":
                 det_ids = (a.get("evidence") or {}).get("detection_ids") or [None]
-                result, error = self._deploy(c, a["profile"], dec_id, det_ids[0], a["simulated"])
+                result, error = self._deploy(c, a["profile"], dec_id, det_ids[0], a["simulated"], a.get("node"))
             elif a["action"] == "scale":
                 result, error = self._scale(c, a["name"], a["replicas"])
             elif a["action"] == "refresh":
@@ -592,6 +670,21 @@ class MapeKController:
             self._extend(c, name)
         return n
 
+    @staticmethod
+    def _remember_pod_ips(c, mgr, rows: list[dict[str, Any]]) -> None:
+        """Keep every pod IP a decoy ever had, so its traffic is still counted after it is gone."""
+        if not rows or not hasattr(mgr, "decoy_pods"):
+            return
+        try:
+            pods = mgr.decoy_pods()
+        except Exception:  # noqa: BLE001
+            return
+        for r in rows:
+            ips = set(json.loads(r.get("pod_ips") or "[]"))
+            new = ips | {p["ip"] for p in pods if p.get("decoy") == r["name"] and p.get("ip")}
+            if new != ips:
+                db.update_row(c, "decoys", r["id"], pod_ips=json.dumps(sorted(new)))
+
     def housekeeping(self, c, cycle_id: int) -> dict[str, Any]:
         out = {"interactions": 0, "expired": [], "ready": [], "vanished": [], "scaled": []}
         mgr = self.manager
@@ -604,6 +697,7 @@ class MapeKController:
             return {**out, "error": f"list failed: {e}"}
         now = now_utc()
         rows = [dict(r) for r in c.execute(f"SELECT * FROM decoys WHERE status IN {ACTIVE}")]
+        self._remember_pod_ips(c, mgr, rows)
         for r in rows:
             k = live.get(r["name"])
             if k is None:

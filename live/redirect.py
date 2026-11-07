@@ -31,6 +31,9 @@ from live.logging_setup import get_logger
 log = get_logger(__name__)
 DEFAULT_LABEL = "ids-deception/quarantine"
 REDIRECT_ANNOTATION = "ids-deception/redirect-to"
+# Comma-separated hosts (target pod IP, its Service names and ClusterIPs). When set, the
+# generator redirects only connections to these hosts; everything else is left alone.
+ONLY_ANNOTATION = "ids-deception/redirect-only"
 
 
 class RedirectError(RuntimeError):
@@ -61,7 +64,8 @@ def find_pod(ip: str, cfg: dict[str, Any], core=None) -> dict[str, Any] | None:
     return None
 
 
-def quarantine(ip: str, cfg: dict[str, Any] | None = None, core=None, redirect_to: str | None = None) -> dict[str, Any]:
+def quarantine(ip: str, cfg: dict[str, Any] | None = None, core=None, redirect_to: str | None = None,
+               only: list[str] | None = None) -> dict[str, Any]:
     """Label the source pod so only the decoys are reachable from it, and point it at
     `redirect_to` (decoy host:port). Never raises for 'not applicable'."""
     cfg = cfg or load_config()
@@ -76,14 +80,15 @@ def quarantine(ip: str, cfg: dict[str, Any] | None = None, core=None, redirect_t
                                                 "only lab pods are ever redirected"}
         meta: dict[str, Any] = {"labels": {st["label"]: "true"}}
         if redirect_to:
-            meta["annotations"] = {REDIRECT_ANNOTATION: redirect_to}
+            meta["annotations"] = {REDIRECT_ANNOTATION: redirect_to, ONLY_ANNOTATION: ",".join(only) if only else None}
         core.patch_namespaced_pod(pod["pod"], pod["namespace"], {"metadata": meta})
     except Exception as e:  # noqa: BLE001
         return {"applied": False, "reason": f"Kubernetes refused the label change: {getattr(e, 'reason', e)}"}
     log.info("redirect: %s (%s/%s) quarantined, sent to %s", ip, pod["namespace"], pod["pod"], redirect_to)
     return {"applied": True, **pod, "label": st["label"], "to": redirect_to,
             "reason": f"pod {pod['namespace']}/{pod['pod']} labelled {st['label']}=true (egress limited to decoys + DNS)"
-                      + (f" and redirected to {redirect_to}" if redirect_to else "")}
+                      + (f" and redirected to {redirect_to}" if redirect_to else "")
+                      + (f" for connections to {', '.join(only[:3])}{' …' if len(only) > 3 else ''} only" if redirect_to and only else "")}
 
 
 def release(redirect: dict[str, Any] | None, cfg: dict[str, Any] | None = None, core=None) -> dict[str, Any]:
@@ -94,7 +99,7 @@ def release(redirect: dict[str, Any] | None, cfg: dict[str, Any] | None = None, 
         core = core or _core(cfg)
         core.patch_namespaced_pod(redirect["pod"], redirect["namespace"],
                                   {"metadata": {"labels": {redirect.get("label", DEFAULT_LABEL): None},
-                                                "annotations": {REDIRECT_ANNOTATION: None}}})
+                                                "annotations": {REDIRECT_ANNOTATION: None, ONLY_ANNOTATION: None}}})
     except Exception as e:  # noqa: BLE001
         if getattr(e, "status", None) == 404:
             return {"released": True, "reason": "pod no longer exists"}
