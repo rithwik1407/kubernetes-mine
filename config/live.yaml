@@ -4,6 +4,9 @@
 paths:
   # Live model: trained on this lab's own CICFlowMeter flows (scripts/train_lab_model.py).
   model_dir: models/k8s-lab-live          # best_model.joblib + metrics.json live here
+  # Written by the dashboard's "Retrain on my lab runs" (scripts/train_lab_model.py on this
+  # machine's own labelled runs). Not in git; when present it is used instead of model_dir.
+  local_model_dir: models/k8s-lab-local
   # Used when model_dir has no best_model.joblib (the CIC-IDS2017 + lab-benign model).
   fallback_model_dir: models/cic-ids2017-lab
   pipeline_dir: ml                   # prepare.py, for the CICFlowMeter column mapping
@@ -119,7 +122,7 @@ deception:
   template: deploy/deception/decoy-template.yaml
   enabled_on_start: false
   loop_interval_seconds: 5
-  max_active_decoys: 4
+  max_active_decoys: 6
   max_replicas: 3
   decoy_ttl_seconds: 600
   max_lifetime_seconds: 3600
@@ -128,10 +131,15 @@ deception:
   deploy_timeout_seconds: 120
   act_on_sources: [pcap, live]
   thresholds:
-    high_confidence: 0.9           # Threat page colouring / behaviour-alert repeats
-    medium_confidence: 0.6
+    high_confidence: 0.9           # Threat page "high" severity / behaviour-alert repeats
+    medium_confidence: 0.6         # Threat page "medium" severity
     repeat_count: 3
     repeat_window_seconds: 300
+  # Which ML severity engages deception: medium (every flow >= medium_confidence counts,
+  # mean >= medium_confidence), high (>= high_confidence), or custom (per-class values
+  # below). min_flows / window_seconds always come from the class, so one flow never
+  # triggers. Changeable on the Deception page.
+  engage_severity: medium
   # When ML detections trigger deception (live/controller.py). Per attack class:
   # trigger when at least `min_flows` flows from ONE source, each with confidence >=
   # `min_confidence`, arrive within `window_seconds` AND their mean confidence is >=

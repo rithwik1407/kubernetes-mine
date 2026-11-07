@@ -74,6 +74,8 @@ class RunRequest(BaseModel):
     targets: list[str] | None = Field(None, max_length=10)
     count: int | None = Field(None, ge=1, le=5000)
     delay: float | None = Field(None, ge=0.0, le=10.0)
+    params: dict[str, str | int | float | None] | None = Field(
+        None, description="generator parameters (see /api/trafficlab/scenarios -> params); validated server side")
     auto_capture: bool = True
     auto_stop: bool = True
 
@@ -162,6 +164,17 @@ def _with_nodes(rows: list[dict]) -> list[dict]:
             r[f"{end}_node"] = hit["node"] if hit else None
             r[f"{end}_pod"] = f"{hit['namespace']}/{hit['pod']}" if hit else None
     return rows
+
+
+@router.get("/api/live/flow-graph")
+def live_flow_graph(seconds: int = Query(60, ge=5, le=3600), max_edges: int = Query(14, ge=1, le=40)):
+    """Attacker/client -> target -> decoy graph of the last `seconds` (for the flow diagrams)."""
+    engs = []
+    try:
+        engs = [e for e in controller().engagement_details(10)["engagements"] if e["state"] == "active"]
+    except Exception:  # noqa: BLE001 - the graph still works without deception
+        pass
+    return queries.flow_graph(seconds, max_edges, CFG, engagements=engs)
 
 
 @router.get("/api/live/threat-counter")
@@ -289,6 +302,27 @@ def predict(req: PredictRequest):
             "predictions": to_records(out)}
 
 
+@router.get("/api/model/retrain-lab")
+def model_retrain_status():
+    from live import retrain
+    return {**retrain.status(), "labelled_sessions": len(retrain.labelled_sessions(CFG))}
+
+
+@router.post("/api/model/retrain-lab", status_code=202)
+def model_retrain_start():
+    """Retrain the live model on this lab's own labelled runs (background; the previous
+    model is copied to <model_dir>/history/ first). New captures use the new model."""
+    from live import retrain
+
+    def reload():
+        with _lock:
+            _STATE.pop("predictor", None)
+    try:
+        return retrain.start(CFG, on_done=reload)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+
+
 @router.get("/api/model/evaluate-sample")
 def evaluate_sample():
     """Score bundled *labelled* held-out rows with the live model and compare to the labels.
@@ -337,8 +371,16 @@ def evaluate_sample():
 # --- traffic lab ----------------------------------------------------------------------
 @router.get("/api/trafficlab/scenarios")
 def trafficlab_scenarios():
-    from live.trafficlab import scenarios, targets
-    return {"scenarios": scenarios(CFG), "targets": targets(CFG)}
+    from live.trafficlab import GEN_PARAMS, scenarios, targets
+    params = {k: {kk: (vv.__name__ if kk == "type" else vv) for kk, vv in v.items() if kk != "env"}
+              for k, v in GEN_PARAMS.items()}
+    return {"scenarios": scenarios(CFG), "targets": targets(CFG), "params": params}
+
+
+@router.get("/api/trafficlab/detection-matrix")
+def trafficlab_detection_matrix():
+    """Detection rate per scenario x target, measured from this lab's own runs."""
+    return queries.detection_matrix(CFG)
 
 
 @router.post("/api/trafficlab/launch", status_code=201)
@@ -416,6 +458,10 @@ def pipeline_preflight():
     return pipeline.preflight(CFG)
 
 
+GEN_PARAM_NAMES = ("concurrency", "duration_s", "target_port", "port_start", "port_end", "scan_timeout",
+                   "slow_conns", "slow_hold_s", "login_path", "payload_set")
+
+
 @router.post("/api/pipeline/run", status_code=201)
 def pipeline_run(req: RunRequest):
     """Generate traffic and make sure it is captured and processed automatically."""
@@ -431,10 +477,13 @@ def pipeline_run(req: RunRequest):
     if len(scen) * max(1, len(tg)) > 20:
         raise HTTPException(400, "at most 20 Jobs per run")
     try:
-        return pipeline.run_scenarios(scen, tg or None, req.count, req.delay, req.auto_capture, req.auto_stop, CFG)
+        return pipeline.run_scenarios(scen, tg or None, req.count, req.delay, req.auto_capture, req.auto_stop, CFG,
+                                      params=req.params)
     except TrafficLabError as e:
         msg = str(e)
-        raise HTTPException(400 if msg.startswith(("target must", "unknown decoy", "no decoy")) else 503, msg)
+        bad_param = msg.startswith(("unknown generator parameter", "port_start must")) or \
+            any(msg.startswith(k + " ") for k in GEN_PARAM_NAMES)
+        raise HTTPException(400 if bad_param or msg.startswith(("target must", "unknown decoy", "no decoy")) else 503, msg)
 
 
 @router.get("/api/pipeline/status")
@@ -457,6 +506,7 @@ def deception_policy():
 class PolicyUpdate(BaseModel):
     classes: dict[str, dict[str, float]] | None = None
     hysteresis: dict[str, float] | None = None
+    engage_severity: Literal["high", "medium", "custom"] | None = None
     reset: bool = False
 
 
@@ -468,10 +518,10 @@ def deception_detection_policy():
 
 @router.put("/api/deception/detection-policy")
 def deception_detection_policy_set(req: PolicyUpdate):
-    if not req.reset and not req.classes and not req.hysteresis:
-        raise HTTPException(422, "nothing to update: give classes, hysteresis or reset")
+    if not req.reset and not req.classes and not req.hysteresis and not req.engage_severity:
+        raise HTTPException(422, "nothing to update: give classes, hysteresis, engage_severity or reset")
     try:
-        return controller().set_detection_policy(req.classes, req.hysteresis, req.reset)
+        return controller().set_detection_policy(req.classes, req.hysteresis, req.reset, req.engage_severity)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
@@ -480,6 +530,18 @@ def deception_detection_policy_set(req: PolicyUpdate):
 def deception_engagements(limit: int = Query(100, ge=1, le=1000)):
     """Engaged sources: trigger, redirect state, linked decoys, release."""
     return controller().engagements(limit)
+
+
+@router.get("/api/deception/not-engaged")
+def deception_not_engaged(minutes: int = Query(15, ge=1, le=1440)):
+    """Detected sources without a decoy, and the controller's reason for each."""
+    from live import podinfo
+    rows = queries.not_engaged(minutes, CFG)
+    pods = podinfo.get(CFG)
+    for r in rows:
+        hit = pods.get(str(r["src_ip"]))
+        r["src_pod"] = f"{hit['namespace']}/{hit['pod']}" if hit else None
+    return rows
 
 
 @router.get("/api/deception/live")

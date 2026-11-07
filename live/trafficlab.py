@@ -170,13 +170,60 @@ def resolve_target(scenario: str, target: str | None, cfg: dict[str, Any], core=
 
 
 # --- jobs ------------------------------------------------------------------------------
+# Generator parameters the dashboard may set, each mapped to one env var of the generator
+# and validated here (type, range, pattern): nothing else from a request reaches the pod.
+GEN_PARAMS: dict[str, dict[str, Any]] = {
+    "concurrency":  {"env": "CONCURRENCY", "type": int, "min": 1, "max": 16, "modes": ["port_scan", "brute_force", "web_attack"],
+                     "help": "parallel workers (rate is about concurrency / delay per second)"},
+    "duration_s":   {"env": "TIME_BUDGET_S", "type": int, "min": 10, "max": 270, "modes": None,
+                     "help": "stop after this many seconds even if count is not reached"},
+    "target_port":  {"env": None, "type": int, "min": 1, "max": 65535, "modes": ["port_scan", "brute_force", "web_attack", "slow_dos", "web_recon"],
+                     "help": "port on the target (brute_force: 22/2222 = SSH-style connects)"},
+    "port_start":   {"env": "PORT_START", "type": int, "min": 1, "max": 65535, "modes": ["port_scan"], "help": "first port to scan"},
+    "port_end":     {"env": "PORT_END", "type": int, "min": 1, "max": 65535, "modes": ["port_scan"], "help": "last port to scan"},
+    "scan_timeout": {"env": "SCAN_TIMEOUT", "type": float, "min": 0.1, "max": 5, "modes": ["port_scan"], "help": "connect timeout per port (s)"},
+    "slow_conns":   {"env": "SLOW_CONNS", "type": int, "min": 1, "max": 1000, "modes": ["slow_dos"], "help": "connections held open"},
+    "slow_hold_s":  {"env": "SLOW_HOLD_S", "type": float, "min": 1, "max": 240, "modes": ["slow_dos"], "help": "seconds the connections are held"},
+    "login_path":   {"env": "LOGIN_PATH", "type": str, "pattern": r"^/[A-Za-z0-9/_.-]{0,63}$", "modes": ["brute_force"],
+                     "help": "HTTP login endpoint"},
+    "payload_set":  {"env": "PAYLOAD_SET", "type": str, "choices": ["mixed", "sqli", "xss", "traversal"], "modes": ["web_attack"],
+                     "help": "attack strings sent"},
+}
+
+
+def check_params(params: dict[str, Any] | None) -> dict[str, Any]:
+    """Validated generator parameters, or TrafficLabError naming the bad one."""
+    out: dict[str, Any] = {}
+    for k, v in (params or {}).items():
+        spec = GEN_PARAMS.get(k)
+        if spec is None:
+            raise TrafficLabError(f"unknown generator parameter {k!r}; one of {sorted(GEN_PARAMS)}")
+        if v is None or v == "":
+            continue
+        try:
+            v = spec["type"](v)
+        except (TypeError, ValueError):
+            raise TrafficLabError(f"{k} must be a {spec['type'].__name__}")
+        if "min" in spec and not spec["min"] <= v <= spec["max"]:
+            raise TrafficLabError(f"{k} must be between {spec['min']} and {spec['max']}")
+        if "pattern" in spec and not re.match(spec["pattern"], v):
+            raise TrafficLabError(f"{k} has an invalid format")
+        if "choices" in spec and v not in spec["choices"]:
+            raise TrafficLabError(f"{k} must be one of {spec['choices']}")
+        out[k] = v
+    if "port_start" in out and "port_end" in out and out["port_start"] > out["port_end"]:
+        raise TrafficLabError("port_start must be <= port_end")
+    return out
+
+
 def scenario_defaults(scenario: str, cfg: dict[str, Any]) -> tuple[int, float]:
     sc = cfg["traffic_lab"]["scenarios"][scenario]
     return int(sc.get("count", 300)), float(sc.get("delay", 0.05))
 
 
 def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
-              count: int | None = None, delay: float | None = None, run_id: str | None = None) -> dict[str, Any]:
+              count: int | None = None, delay: float | None = None, run_id: str | None = None,
+              params: dict[str, Any] | None = None) -> dict[str, Any]:
     """The Job manifest. `target` must already be resolved (host:port[,host:port])."""
     tl = cfg["traffic_lab"]
     if scenario not in tl["scenarios"]:
@@ -191,6 +238,9 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
     if target is None:
         t = tl["targets"][sc.get("default_target") or next(iter(tl["targets"]))]
         target = f"{t['host']}:{t['port']}"
+    params = check_params(params)
+    if params.get("target_port") and "," not in target:
+        target = f"{target.rsplit(':', 1)[0]}:{params['target_port']}"
     env = [
         {"name": "MODE", "value": mode},
         {"name": "TARGET", "value": target},
@@ -204,6 +254,8 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "REDIRECT_FILE", "value": "/etc/podinfo/annotations"},
     ]
     env += [{"name": str(k), "value": str(v)} for k, v in (sc.get("env") or {}).items()]
+    over = {GEN_PARAMS[k]["env"]: str(v) for k, v in params.items() if GEN_PARAMS[k]["env"]}
+    env = [e for e in env if e["name"] not in over] + [{"name": k, "value": v} for k, v in over.items()]
     container = {
         "name": "generator", "image": tl.get("image", "python:3.13-alpine"),
         "command": ["python", "/app/traffic_generator.py"], "env": env,
@@ -233,14 +285,16 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         "metadata": {"generateName": f"traffic-{slug}-", "namespace": tl["namespace"], "labels": dict(labels),
                      "annotations": {"ids/scenario": scenario, "ids/mode": mode, "ids/target": target[:250],
                                      "ids/expect-class": expect or "", "ids/run": run_id or "",
-                                     "ids/count": str(int(count)), "ids/delay": str(float(delay))}},
+                                     "ids/count": str(int(count)), "ids/delay": str(float(delay)),
+                                     "ids/params": json.dumps(params, sort_keys=True)[:250]}},
         "spec": {"backoffLimit": 0, "activeDeadlineSeconds": deadline,
                  "ttlSecondsAfterFinished": 3600, "template": pod},
     }
 
 
 def launch(scenario: str, target: str | None = None, count: int | None = None, delay: float | None = None,
-           cfg: dict[str, Any] | None = None, run_id: str | None = None) -> dict[str, Any]:
+           cfg: dict[str, Any] | None = None, run_id: str | None = None,
+           params: dict[str, Any] | None = None) -> dict[str, Any]:
     cfg = cfg or load_config()
     if scenario not in cfg["traffic_lab"]["scenarios"]:
         raise TrafficLabError(f"unknown scenario {scenario!r}; one of {sorted(cfg['traffic_lab']['scenarios'])}")
@@ -249,7 +303,7 @@ def launch(scenario: str, target: str | None = None, count: int | None = None, d
     if not ready["ready"]:
         raise TrafficLabError(ready["reason"] + (f" — run: {ready['fix']}" if ready.get("fix") else ""))
     resolved = resolve_target(scenario, target, cfg, core)
-    body = build_job(scenario, cfg, resolved["target"], count, delay, run_id)
+    body = build_job(scenario, cfg, resolved["target"], count, delay, run_id, params)
     try:
         created = batch.create_namespaced_job(cfg["traffic_lab"]["namespace"], body)
     except client.exceptions.ApiException as e:
@@ -259,7 +313,8 @@ def launch(scenario: str, target: str | None = None, count: int | None = None, d
     return {"job": created.metadata.name, "scenario": scenario, "mode": cfg["traffic_lab"]["scenarios"][scenario]["mode"],
             "target": resolved["target"], "target_label": resolved["label"], "note": resolved.get("note"),
             "expect_class": cfg["traffic_lab"]["scenarios"][scenario].get("expect_class"),
-            "count": int(ann.get("ids/count", 0)), "delay": float(ann.get("ids/delay", 0))}
+            "count": int(ann.get("ids/count", 0)), "delay": float(ann.get("ids/delay", 0)),
+            "params": json.loads(ann.get("ids/params") or "{}")}
 
 
 def _conditions(j) -> list[dict[str, Any]]:

@@ -150,6 +150,24 @@ tr.mal td:first-child { box-shadow: inset 2px 0 0 var(--critical); }
 .loading { color: var(--muted); font-size: 13px; padding: 18px 4px; display: flex; gap: 8px; align-items: center; }
 .loading::before { content: ""; width: 12px; height: 12px; border: 2px solid var(--muted); border-right-color: transparent; border-radius: 50%; animation: spin .7s linear infinite; }
 .chart { width: 100%; height: 280px; }
+/* flow diagrams (attacker -> target -> decoy) */
+.flowdia { position: relative; width: 100%; min-height: 220px; }
+.flowdia svg { width: 100%; display: block; overflow: visible; }
+.flowdia .fd-node { transition: transform .7s cubic-bezier(.4,0,.2,1), opacity .5s; }
+.flowdia .fd-node rect { fill: var(--surface-2); stroke: var(--border-2); stroke-width: 1; transition: stroke .5s, fill .5s; }
+.flowdia .fd-node.sev-high rect { stroke: var(--critical); fill: color-mix(in srgb, var(--critical) 12%, var(--surface-2)); }
+.flowdia .fd-node.sev-medium rect { stroke: var(--serious); fill: color-mix(in srgb, var(--serious) 10%, var(--surface-2)); }
+.flowdia .fd-node.sev-low rect { stroke: var(--warning); }
+.flowdia .fd-node.role-decoy rect { stroke-dasharray: 4 3; stroke: var(--accent); }
+.flowdia .fd-node text { fill: var(--text); font: 12px Inter, system-ui, sans-serif; pointer-events: none; }
+.flowdia .fd-node text.sub { fill: var(--muted); font-size: 10.5px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.flowdia .fd-node text.role { fill: var(--muted); font-size: 9.5px; letter-spacing: .06em; text-transform: uppercase; }
+.flowdia .fd-edge { fill: none; stroke-linecap: round; transition: d .7s cubic-bezier(.4,0,.2,1), stroke-width .5s, stroke .5s, opacity .5s; }
+.flowdia .fd-edge.redirect { stroke-dasharray: 6 5; }
+.flowdia .fd-col { fill: var(--muted); font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+.flowdia .fd-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
+.flowdia .fd-legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+@media (prefers-reduced-motion: reduce) { .flowdia .fd-node, .flowdia .fd-edge { transition: none; } .flowdia .fd-particle { display: none; } }
 .chart.tall { height: 340px; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; }
 .kv dt { color: var(--muted); } .kv dd { margin: 0; min-width: 0; overflow-wrap: anywhere; }
@@ -241,6 +259,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
         <div class="seg" role="group" aria-label="Time range"><button data-range="5">5 min</button><button data-range="15" class="on">15 min</button><button data-range="30">30 min</button></div></div><div id="ovActivity" class="chart"></div></div>
       <div class="card"><div class="card-head"><div><h2>Recent security events</h2><p class="hint">Malicious detections, flow bursts / port sweeps and decoy actions</p></div></div><ul class="feed" id="ovEvents"><li class="loading">Loading…</li></ul></div>
     </div>
+    <div class="card" style="margin-top:14px"><h2>Traffic flow</h2><p class="hint" id="ovFlowHint">Attacker / client → target → decoy for the selected time range. Line width = flows, colour = severity; malicious paths glow.</p><div id="ovFlow" class="flowdia"></div></div>
     <div class="grid two" style="margin-top:14px">
       <div class="card"><h2>Traffic distribution</h2><p class="hint">Benign vs malicious flows scored by the live model</p><div id="ovDist" class="chart"></div></div>
       <div class="card"><h2>Attack classification</h2><p class="hint">Malicious flows by predicted class</p><div id="ovClasses" class="chart"></div></div>
@@ -289,6 +308,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <!-- D. WINDOW -->
   <section class="page" id="p-window" data-title="Adaptive observation window" data-sub="Chosen by the capture service after every window from measured packet rate and threat evidence">
     <div class="grid kpis" id="winKpis"></div>
+    <div class="card" style="margin-top:14px"><h2>Traffic flow</h2><p class="hint" id="winFlowHint">Who talked to whom in the recent windows</p><div id="winFlow" class="flowdia"></div></div>
     <div class="grid two" style="margin-top:14px">
       <div class="card"><h2>Window size over time</h2><p class="hint">Each point is one capture window; marker colour shows the rule that chose the next size</p><div id="winChart" class="chart"></div></div>
       <div class="card"><h2>Policy</h2><p class="hint">First matching rule wins (config/live.yaml → capture.window)</p><div id="winPolicy"></div></div>
@@ -312,6 +332,9 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
             <label class="field"><span>Delay (s) <span class="tip" tabindex="0" title="Seconds the generator waits between two requests (0–10). 0 = as fast as possible. Smaller delays mean more flows per capture window, which is what the burst / port-sweep detectors look for. Leave empty to use each attack's default.">?</span></span><input id="labDelay" type="number" min="0" max="10" step="0.01" placeholder="per-attack default"><span class="err"></span></label>
             <label class="field check"><span><input id="labAutoStop" type="checkbox" checked> Stop capture when done <span class="tip" tabindex="0" title="When every Job of the run has finished (succeeded or failed), wait a short drain period so the last capture window is scored, then stop capture automatically. The Stop button on Live Traffic still overrides it.">?</span></span></label>
           </div>
+          <details id="labAdv" style="margin-top:8px"><summary class="hint" style="cursor:pointer">Generator parameters (rate, duration, concurrency, port, payloads)</summary>
+            <p class="hint" style="margin:6px 0">Empty = the attack's default. Each value is checked by the server and passed to the generator as one environment variable; a parameter only applies to the attacks listed under it.</p>
+            <div class="form" id="labParams"></div></details>
         </form>
         <p class="hint" id="labDesc" style="margin-top:4px"></p>
         <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="labRun">Generate &amp; capture</button><button class="btn" id="labLaunch">Launch only</button></div>
@@ -325,6 +348,9 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
         </div>
       </div>
     </div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detection by attack × target</h2><p class="hint" id="mxHint">Share of each attack pod's flows (DNS excluded) that the model put in the expected class, from this lab's own runs. Ground truth is the Job's pod, never the model.</p></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap"><span class="hint" id="rtState" style="margin:0"></span><button class="btn" id="rtBtn" title="Train the live model on this machine's own labelled Traffic-lab runs; the newest run of each attack is held out for testing. The current model is kept.">Retrain on my lab runs</button></div></div>
+      <div id="mxTable"></div><div id="rtOut" style="margin-top:10px"></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Latest run</h2><p class="hint" id="runHint">No run yet</p></div></div><div class="steps" id="runSteps"></div><div id="runClasses" style="margin-top:10px"></div></div>
     <div class="card" style="margin-top:14px"><h2>Jobs</h2><p class="hint">"Verified" only when the generator log shows connections answered by the target</p><div id="jobsTable"></div></div>
   </section>
@@ -335,13 +361,18 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="decEnable">Enable automatic deception</button><button class="btn" id="decDisable">Disable</button><button class="btn" id="decCycle">Run cycle now</button></div></div>
       <div class="grid kpis" id="decKpis"></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Live deception</h2><p class="hint">Each engaged attacker: the pod its attack hits, the decoy placed on that pod's node, and the traffic that has reached the decoy. Decoy flows are counted from captured flows between the attacker and the decoy pod IPs; requests from the decoy's own log.</p></div></div>
+      <div id="decFlow" class="flowdia" style="margin-bottom:12px"></div>
       <div id="decLive"><div class="loading">Loading…</div></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detected but not engaged</h2><p class="hint">Sources the model or the behaviour rules flagged in the last 15 minutes that have no decoy, with the controller's reason (severity or flow threshold not met, cooldown, decoy limit, control-plane or decoy traffic).</p></div></div><div id="decNot"></div></div>
     <div class="grid two" style="margin-top:14px">
       <div class="card"><h2>Decoy pods</h2><p class="hint">Live from Kubernetes (namespace ids-deception)</p><div id="decPods"></div></div>
       <div class="card"><h2>Check it yourself</h2><p class="hint">Run these on the machine with your kubeconfig</p><div id="decCmds"></div></div>
     </div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detection thresholds</h2><p class="hint">When ML detections trigger a decoy + redirect: per attack class, at least <b>N flows</b> from one source, each ≥ <b>min confidence</b>, within <b>T seconds</b>, with <b>mean confidence</b> ≥ X. A single flow never triggers. Control-plane traffic (API server, kubelet, kube-system) is never acted on.</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" id="polSave">Save thresholds</button><button class="btn small" id="polReset">Reset to defaults</button></div></div>
+      <div class="form" style="margin-bottom:10px;align-items:end"><label class="field">Engage deception at
+        <select id="polSev" class="btn" aria-describedby="polSevHint"><option value="medium">Medium severity and above (confidence ≥ 0.60)</option><option value="high">High severity only (confidence ≥ 0.90)</option><option value="custom">Custom: per-class values in the table</option></select></label>
+        <p class="hint" id="polSevHint" style="margin:0 0 6px">With medium or high, every flow at or above that confidence counts and the mean must reach it; each class still needs its <b>N flows</b> in <b>T seconds</b> (a single flow never triggers).</p></div>
       <form id="polForm" novalidate><div id="polTable"><div class="loading">Loading…</div></div></form>
       <div id="polEng" style="margin-top:12px"></div></div>
     <div class="grid two" style="margin-top:14px">
@@ -521,7 +552,7 @@ function layout(extra = {}) {
     xaxis: { gridcolor: cssVar("--grid"), linecolor: cssVar("--axis"), zeroline: false, tickfont: { color: cssVar("--muted") } },
     yaxis: { gridcolor: cssVar("--grid"), linecolor: cssVar("--axis"), zeroline: false, tickfont: { color: cssVar("--muted") }, rangemode: "tozero" },
     hoverlabel: { bgcolor: cssVar("--surface-3"), bordercolor: cssVar("--border-2"), font: { color: cssVar("--text") } },
-    bargap: 0.35,
+    bargap: 0.35, transition: { duration: 600, easing: "cubic-in-out" },
   }, extra);
 }
 function plot(id, traces, lay, emptyMsg) {
@@ -529,6 +560,104 @@ function plot(id, traces, lay, emptyMsg) {
   if (!traces) { Plotly.purge(el); el.innerHTML = empty(emptyMsg || "No data yet"); return; }
   if (el.querySelector(".empty")) el.innerHTML = "";
   Plotly.react(el, traces, layout(lay), { displayModeBar: false, responsive: true });
+}
+
+/* ---------------- flow diagrams ----------------
+   Attacker/client -> target -> decoy in three columns. Nodes are ordered to keep edges
+   from crossing (targets and decoys follow the average position of what feeds them),
+   edges are smooth curves whose width follows the flow count and whose colour follows
+   the severity, malicious paths glow and carry moving particles. Elements are keyed by
+   id and updated in place, so nodes glide to new positions instead of redrawing. */
+const SEV_COLOR = { high: "--critical", medium: "--serious", low: "--warning", benign: "--c-benign" };
+const SEV_RANK = { benign: 0, low: 1, medium: 2, high: 3 };
+function flowDiagram(id, g, opts = {}) {
+  const host = $(id); if (!host) return;
+  if (!g || !g.edges.length) {
+    host.dataset.fd = ""; host.innerHTML = empty(opts.emptyTitle || "No traffic in this period", opts.emptyBody || "Flows appear here as soon as capture scores them.");
+    return;
+  }
+  const NS = "http://www.w3.org/2000/svg";
+  let svg = host.querySelector("svg");
+  if (!svg || host.dataset.fd !== "1") {
+    host.dataset.fd = "1";
+    host.innerHTML = `<svg role="img" aria-label="${esc(opts.label || "Traffic flow diagram")}"><defs>
+      <filter id="${id}-glow" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      </defs><g class="cols"></g><g class="edges"></g><g class="parts"></g><g class="nodes"></g></svg>
+      <div class="fd-legend"><span><i style="background:${cssVar("--critical")}"></i>high severity</span><span><i style="background:${cssVar("--serious")}"></i>medium</span><span><i style="background:${cssVar("--warning")}"></i>low</span><span><i style="background:${cssVar("--c-benign")}"></i>benign</span><span><i style="background:repeating-linear-gradient(90deg,${cssVar("--accent")} 0 5px,transparent 5px 9px)"></i>redirected to decoy</span><span class="fd-trunc"></span></div>`;
+    svg = host.querySelector("svg");
+  }
+  const W = Math.max(320, host.clientWidth || 800), nodeW = Math.min(210, W * 0.27), nodeH = 46, gapY = 14, top = 26;
+  const col = n => n.role === "decoy" ? 2 : n.role === "target" ? 1 : 0;
+  const cols = [[], [], []]; g.nodes.forEach(n => cols[col(n)].push(n));
+  const pos = {};
+  const place = (list, c) => list.forEach((n, i) => pos[n.id] = { c, i });
+  // sources: attackers first, then by flow volume; targets/decoys by barycentre of their inputs
+  const vol = {}; g.edges.forEach(e => { vol[e.src] = (vol[e.src] || 0) + e.flows + 1e6 * e.malicious; });
+  cols[0].sort((a, b) => (b.role === "attacker") - (a.role === "attacker") || (vol[b.id] || 0) - (vol[a.id] || 0));
+  place(cols[0], 0);
+  for (const c of [1, 2]) {
+    const bary = n => { const ins = g.edges.filter(e => e.dst === n.id && pos[e.src]); return ins.length ? ins.reduce((a, e) => a + pos[e.src].i, 0) / ins.length : 99; };
+    cols[c].sort((a, b) => bary(a) - bary(b)); place(cols[c], c);
+  }
+  const rows = Math.max(...cols.map(x => x.length), 1), skip = g.edges.some(e => pos[e.src].c === 0 && pos[e.dst].c === 2);
+  const laneY = top + rows * (nodeH + gapY) + 6, H = laneY + (skip ? 22 : 2);
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`); svg.style.height = H + "px";
+  const xs = [8, (W - nodeW) / 2, W - nodeW - 8];
+  const yOf = (c, i) => { const n = cols[c].length, used = n * nodeH + (n - 1) * gapY, off = top + ((rows * (nodeH + gapY) - gapY) - used) / 2; return off + i * (nodeH + gapY); };
+  const xy = idn => { const p = pos[idn]; return { x: xs[p.c], y: yOf(p.c, p.i) }; };
+  // column titles
+  svg.querySelector(".cols").innerHTML = ["Attacker / client", "Target", "Decoy"].map((t, c) => cols[c].length ? `<text class="fd-col" x="${xs[c] + 2}" y="14">${t}</text>` : "").join("");
+  // keyed update helper
+  const sync = (layer, items, key, make, update) => {
+    const g0 = svg.querySelector(layer), seen = new Set();
+    items.forEach(it => {
+      const k = key(it); seen.add(k);
+      let el = g0.querySelector(`[data-k="${CSS.escape(k)}"]`);
+      if (!el) { el = make(it); el.setAttribute("data-k", k); el.style.opacity = 0; g0.appendChild(el); requestAnimationFrame(() => { el.style.opacity = ""; }); }
+      update(el, it);
+    });
+    g0.querySelectorAll("[data-k]").forEach(el => { if (!seen.has(el.dataset.k) && !el.dataset.gone) { el.dataset.gone = 1; el.style.opacity = 0; setTimeout(() => el.remove(), 500); } });
+  };
+  const maxF = Math.max(...g.edges.map(e => e.flows), 1);
+  const path = e => {
+    const a = xy(e.src), b = xy(e.dst), x1 = a.x + nodeW, y1 = a.y + nodeH / 2, x2 = b.x, y2 = b.y + nodeH / 2;
+    if (pos[e.src].c === 0 && pos[e.dst].c === 2) {        // skip the target column: run in a lane under it
+      const l1 = xs[1] - 18, l2 = xs[1] + nodeW + 18, ly = laneY + 8, m1 = (x1 + l1) / 2, m2 = (l2 + x2) / 2;
+      return `M${x1},${y1} C${m1},${y1} ${m1},${ly} ${l1},${ly} L${l2},${ly} C${m2},${ly} ${m2},${y2} ${x2},${y2}`;
+    }
+    const mx = (x1 + x2) / 2; return `M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}`;
+  };
+  const color = e => cssVar(e.redirect && e.severity === "benign" ? "--accent" : SEV_COLOR[e.severity]);
+  const ek = e => e.src + ">" + e.dst;
+  sync(".edges", g.edges, ek, () => document.createElementNS(NS, "path"), (el, e) => {
+    el.setAttribute("class", "fd-edge" + (e.redirect ? " redirect" : ""));
+    el.setAttribute("id", `${id}-e-${ek(e).replace(/[^0-9a-z]/gi, "_")}`);
+    el.setAttribute("d", path(e)); el.style.d = `path("${path(e)}")`;
+    el.setAttribute("stroke", color(e)); el.setAttribute("stroke-width", (1.5 + 5 * Math.sqrt(e.flows / maxF)).toFixed(2));
+    el.setAttribute("stroke-opacity", e.severity === "benign" ? 0.45 : 0.9);
+    if (SEV_RANK[e.severity] >= 2) el.setAttribute("filter", `url(#${id}-glow)`); else el.removeAttribute("filter");
+    el.innerHTML = `<title>${esc(e.src)} → ${esc(e.dst)}: ${fmt(e.flows)} flows, ${fmt(e.packets)} packets, ${fmt(e.malicious)} malicious${e.class ? " (" + esc(e.class) + ", max confidence " + fmt(e.conf, 2) + ")" : ""}${e.redirect ? " · redirected to decoy" : ""}</title>`;
+  });
+  // particles: more and faster for busier / more severe paths; rebuilt only when the path changes
+  sync(".parts", g.edges.filter(e => e.flows > 0 || e.redirect), ek, () => document.createElementNS(NS, "g"), (el, e) => {
+    const sig = `${path(e)}|${e.severity}|${Math.ceil(4 * e.flows / maxF)}`;
+    if (el.dataset.sig === sig) return;
+    el.dataset.sig = sig;
+    const n = e.severity === "benign" ? 1 : Math.max(1, Math.ceil(4 * e.flows / maxF)), dur = (SEV_RANK[e.severity] >= 2 ? 1.6 : 2.6) + Math.random() * 0.4;
+    el.innerHTML = Array.from({ length: n }, (_, i) => `<circle class="fd-particle" r="${SEV_RANK[e.severity] >= 2 ? 3.2 : 2.4}" fill="${color(e)}" opacity="0.95"><animateMotion dur="${dur.toFixed(2)}s" begin="${(-i * dur / n).toFixed(2)}s" repeatCount="indefinite" path="${path(e)}" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.6 1"/></circle>`).join("");
+  });
+  sync(".nodes", g.nodes, n => n.id, () => document.createElementNS(NS, "g"), (el, n) => {
+    const p = xy(n.id);
+    el.setAttribute("class", `fd-node role-${n.role} sev-${n.severity}`);
+    el.setAttribute("transform", `translate(${p.x},${p.y})`); el.style.transform = `translate(${p.x}px,${p.y}px)`;
+    const name = n.label.length > 26 ? n.label.slice(0, 25) + "…" : n.label;
+    const sub = [n.ip !== n.label ? n.ip : null, n.node ? "node " + n.node : null].filter(Boolean).join(" · ");
+    const html = `<title>${esc(n.namespace ? n.namespace + "/" + n.label : n.label)} · ${esc(n.ip)}${n.node ? " · node " + esc(n.node) : ""} · ${esc(n.role)}${n.scenario ? " (" + esc(n.scenario) + ")" : ""}</title>
+      <rect width="${nodeW}" height="${nodeH}" rx="9"/><text class="role" x="10" y="13">${esc(n.role)}${n.severity !== "benign" ? " · " + esc(n.severity) : ""}</text>
+      <text x="10" y="28">${esc(name)}</text><text class="sub" x="10" y="40">${esc(sub)}</text>`;
+    if (el.dataset.html !== html) { el.dataset.html = html; el.innerHTML = html; }
+  });
+  host.querySelector(".fd-trunc").textContent = g.truncated ? `+${g.truncated} smaller path(s) not shown` : "";
 }
 
 /* ---------------- shared state ---------------- */
@@ -575,9 +704,11 @@ function drawActivity(act) {
   const ev = act.events || [], al = act.alerts || [];
   const bucketOf = t => { const k = Math.floor((new Date(t) - new Date(act.start)) / (bucket * 1000)); return bs[Math.max(0, Math.min(bs.length - 1, k))]; };
   const traces = [
-    { type: "scatter", mode: "lines", name: "Benign flows", x, y: benign, connectgaps: false, line: { color: cssVar("--c-benign"), width: 2, shape: "linear" },
+    { type: "scatter", mode: "lines", name: "Benign flows", x, y: benign, connectgaps: false, line: { color: cssVar("--c-benign"), width: 2, shape: "spline", smoothing: 0.6 },
       fill: "tozeroy", fillcolor: "rgba(111,110,105,.18)", hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} benign flows<extra></extra>" },
-    { type: "scatter", mode: "lines", name: "Malicious flows (model)", x, y: mal, connectgaps: false, line: { color: cssVar("--critical"), width: 2 },
+    { type: "scatter", mode: "lines", name: "glow", showlegend: false, hoverinfo: "skip", x, y: mal, connectgaps: false,
+      line: { color: cssVar("--critical"), width: 9, shape: "spline", smoothing: 0.6 }, opacity: 0.18 },
+    { type: "scatter", mode: "lines", name: "Malicious flows (model)", x, y: mal, connectgaps: false, line: { color: cssVar("--critical"), width: 2, shape: "spline", smoothing: 0.6 },
       hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} malicious flows<extra></extra>" },
     { type: "scatter", mode: "markers", name: "Malicious detection", x: ev.map(e => mid(bucketOf(e.t))), y: ev.map(e => (bucketOf(e.t) || {}).malicious || 0),
       marker: { color: cssVar("--critical"), size: 10, symbol: "diamond", line: { color: cssVar("--surface"), width: 2 } },
@@ -625,6 +756,7 @@ async function pageOverview(full) {
     kpi("Node CPU", node ? u(fmt(node.cpu_cores, 2), "cores") : NA, node ? `memory ${fmt(node.memory_mb)} MiB (metrics-server)` : esc(((r.cluster || {}).error || "metrics-server unavailable").slice(0, 60))),
   ].join("");
   drawActivity(act);
+  api(`/api/live/flow-graph?seconds=${Math.min(3600, (S.ovRange || 15) * 60)}`).then(g => flowDiagram("ovFlow", g, { emptyBody: "Start capture or run a Traffic-lab scenario." })).catch(() => { });
   // events
   $("ovEvents").html = ev.length ? ev.map(e => `<li><span class="when">${time(e.ts)}</span><span class="what">${e.kind === "detection" ? clsTag(e.title) : `<b>${esc(e.title)}</b>`}
     <span style="color:var(--muted)">${esc(e.src_ip || "")}${e.dst_ip ? " → " + esc(e.dst_ip) : ""}${e.dst_port ? ":" + esc(e.dst_port) : ""}${e.n ? " · " + fmt(e.n) + (e.kind === "detection" ? " flow(s)" : e.kind === "deception" ? " evidence" : " flows") : ""}${e.confidence ? " · conf " + fmt(e.confidence, 2) : ""}</span>${e.kind === "deception" && e.reason ? `<span class="hint" style="display:block;margin:2px 0 0;white-space:normal">${esc(e.trigger || "")} → ${esc(e.action)} (${esc(e.capture_file || "")}): ${esc(e.reason.slice(0, 220))}${e.evidence_flows && e.evidence_flows.length ? ` · evidence flows #${e.evidence_flows.slice(0, 5).join(", #")}` : ""}</span>` : ""}</span></li>`).join("")
@@ -753,11 +885,20 @@ async function pageWindow() {
   $("winPolicy").html = table([{ h: "Rule", f: r => `<b>${esc(r.id)}</b>` }, { h: "When", wrap: 1, k: "when" }, { h: "Then", f: r => `<span style="white-space:normal;display:inline-block;min-width:140px">${esc(r.then)}</span>` }], p.rules) +
     `<p class="hint" style="margin-top:8px">Initial window ${p.initial_seconds} s. Threat evidence uses ML confidence ≥ ${p.evidence_confidence}. Shorter windows cut TCP flows into more pieces (CICFlowMeter converts each window separately), so threats shrink to ${p.threat_seconds} s rather than the minimum.</p>`;
   const pts = all.filter(r => r.rule !== "start").reverse();
-  const ruleColor = { R1_threat: cssVar("--critical"), R2_high_rate: cssVar("--warning"), R3_calm: cssVar("--good"), R4_hold: cssVar("--muted") };
-  plot("winChart", pts.length ? [{ type: "scatter", mode: "lines+markers", line: { shape: "hv", width: 2, color: cssVar("--accent") },
-    x: pts.map(r => new Date(r.created_at)), y: pts.map(r => r.next_s), marker: { size: 8, color: pts.map(r => ruleColor[r.rule] || cssVar("--muted")), line: { color: cssVar("--surface"), width: 2 } },
-    customdata: pts.map(r => [r.rule, r.reason]), hovertemplate: "%{x|%H:%M:%S} → %{y} s<br>%{customdata[0]}<extra></extra>" }] : null,
-    { yaxis: Object.assign(layout().yaxis, { title: { text: "next window (s)", font: { size: 11 } }, tickvals: p.sizes }) }, "No windows captured yet");
+  const ruleColor = { R0_backlog: cssVar("--accent"), R1_threat: cssVar("--critical"), R2_high_rate: cssVar("--warning"), R3_calm: cssVar("--good"), R4_hold: cssVar("--muted") };
+  // one clean step line; a marker only where the size actually changed, coloured by the rule
+  const chg = pts.filter((r, i) => i === 0 || r.next_s !== pts[i - 1].next_s);
+  const rulesSeen = [...new Set(chg.map(r => r.rule))];
+  plot("winChart", pts.length ? [
+    { type: "scatter", mode: "lines", line: { shape: "hv", width: 2.2, color: cssVar("--accent") }, fill: "tozeroy", fillcolor: "rgba(57,135,229,.10)",
+      x: pts.map(r => new Date(r.created_at)), y: pts.map(r => r.next_s), hovertemplate: "%{x|%H:%M:%S} · window %{y} s<extra></extra>", showlegend: false },
+    ...rulesSeen.map(rule => { const rs = chg.filter(r => r.rule === rule); return { type: "scatter", mode: "markers", name: rule.replace("_", " "),
+      x: rs.map(r => new Date(r.created_at)), y: rs.map(r => r.next_s), marker: { size: 9, color: ruleColor[rule] || cssVar("--muted"), line: { color: cssVar("--surface"), width: 2 } },
+      customdata: rs.map(r => [r.previous_s ?? "—", r.reason.slice(0, 90)]), hovertemplate: "%{x|%H:%M:%S}: %{customdata[0]} → %{y} s<br>" + rule + ": %{customdata[1]}<extra></extra>" }; }),
+  ] : null, { showlegend: rulesSeen.length > 0, legend: { orientation: "h", y: -0.22, x: 0, font: { size: 11, color: cssVar("--text-2") } }, margin: { l: 48, r: 12, t: 8, b: 56 },
+    yaxis: Object.assign(layout().yaxis, { title: { text: "window (s)", font: { size: 11 } }, tickvals: p.sizes, range: [0, Math.max(...p.sizes) * 1.15] }) }, "No windows captured yet");
+  const flowS = Math.min(300, Math.max(30, (ws.current_window_s || 10) * 6));
+  api(`/api/live/flow-graph?seconds=${flowS}`).then(g => { $("winFlowHint").textContent = `Who talked to whom in the last ${flowS} s (about six observation windows). Line width = flows, colour = severity of the model's verdict; dashed = redirected to a decoy.`; flowDiagram("winFlow", g, { emptyBody: ws.running ? "No scored flows in this period yet." : "Capture is not running." }); }).catch(() => { });
   const rows = changed ? all.filter(r => r.changed) : all;
   $("winTable").html = table([
     { h: "Time", f: r => time(r.created_at) }, { h: "Change", f: r => `${r.previous_s ?? "—"} → <b>${r.next_s}</b> s` }, { h: "Rule", f: r => esc(r.rule) },
@@ -800,10 +941,53 @@ function labBody() {
   const body = { scenarios: sc, targets: needsTarget ? tg : null, auto_stop: $("labAutoStop").checked };
   if (c.value !== "") body.count = +c.value;
   if (d.value !== "") body.delay = +d.value;
+  const params = {};
+  $("labParams").querySelectorAll("[data-param]").forEach(el => {
+    const v = el.value.trim(); el.nextElementSibling.textContent = "";
+    if (v === "") return;
+    if (el.type === "number" && !el.checkValidity()) { el.nextElementSibling.textContent = `${el.min}–${el.max}`; ok = false; return; }
+    params[el.dataset.param] = el.type === "number" ? +v : v;
+  });
+  if (!ok) throw new ApiError(422, "Fix the highlighted fields");
+  if (Object.keys(params).length) body.params = params;
   return body;
+}
+function renderParams() {
+  const ps = S.scenarios.params || {}; if ($("labParams").childElementCount) return;
+  const label = { concurrency: "Concurrency", duration_s: "Max duration (s)", target_port: "Target port", port_start: "Scan from port", port_end: "Scan to port",
+    scan_timeout: "Scan timeout (s)", slow_conns: "Slow connections", slow_hold_s: "Hold time (s)", login_path: "Login path", payload_set: "Payloads" };
+  $("labParams").innerHTML = Object.entries(ps).map(([k, p]) => {
+    const tip = `${p.help}. Applies to: ${p.modes ? p.modes.join(", ") : "all attacks"}.`;
+    const input = p.choices ? `<select data-param="${k}"><option value="">default</option>${p.choices.map(c => `<option>${esc(c)}</option>`).join("")}</select>`
+      : `<input data-param="${k}" type="${p.type === "str" ? "text" : "number"}" ${p.type === "str" ? `maxlength="64" placeholder="/login"` : `min="${p.min}" max="${p.max}" step="${p.type === "float" ? "0.1" : "1"}" placeholder="default"`}>`;
+    return `<label class="field"><span>${esc(label[k] || k)} <span class="tip" tabindex="0" title="${esc(tip)}">?</span></span>${input}<span class="err"></span></label>`;
+  }).join("");
+}
+async function renderMatrix(full) {
+  if (!full && S.slow % 3 !== 0 && S.mx) return;
+  const [mx, rt] = await Promise.all([api("/api/trafficlab/detection-matrix"), api("/api/model/retrain-lab")]);
+  S.mx = mx;
+  const pct1 = v => v == null ? NA : pct(v, 1);
+  const rate = (v, ok) => v == null ? NA : `<span style="color:${v >= 0.8 ? "var(--ok-ink, #3fb950)" : v >= 0.5 ? "var(--warning-ink)" : "var(--critical-ink)"}">${pct(v, 1)}</span>`;
+  $("mxTable").html = table([
+    { h: "Attack", k: "scenario" }, { h: "Target", k: "target" }, { h: "Expected", f: r => r.expect_class ? clsTag(r.expect_class) : "—" },
+    { h: "Runs", num: 1, k: "runs" }, { h: "Flows", num: 1, f: r => fmt(r.flows) },
+    { h: "Detected as expected", num: 1, f: r => rate(r.detection_rate) }, { h: "Any attack class", num: 1, f: r => pct1(r.attack_rate) },
+    { h: "Last run", num: 1, f: r => r.last_rate == null ? NA : `${pct(r.last_rate, 1)} <span class="na">${ago(r.last_run)}</span>` },
+    { h: "Model", f: r => esc(r.models.join(", ")) },
+  ], mx.cells, { emptyTitle: "No labelled runs yet", emptyBody: "Run attacks with “Generate & capture”; each finished run adds its flows here." });
+  $("mxHint").textContent = `Share of each attack pod's flows (DNS excluded) that the model put in the expected class, from this lab's own runs. Live model now: ${mx.model_in_use === "k8s-lab-live" && rt.state !== "done" ? "k8s-lab-live (trained in the sandbox)" : mx.model_in_use}.`;
+  $("rtBtn").disabled = rt.state === "running";
+  $("rtState").textContent = rt.state === "running" ? `retraining… (started ${ago(rt.started_at)})` : rt.state === "done" ? `retrained ${ago(rt.finished_at)}` : rt.state === "failed" ? "retraining failed" : `${fmt(rt.labelled_sessions)} labelled run(s) available`;
+  $("rtOut").html = rt.state === "failed" ? errBox(`${rt.error}\n${(rt.log || "").slice(-600)}`) : rt.state === "done" && rt.result ? `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">` +
+    kpi("Held-out accuracy", rt.result.accuracy == null ? NA : pct(rt.result.accuracy, 1), rt.test_sessions.length ? `sessions ${rt.test_sessions.join(", ")}` : "no held-out run (run each attack twice)") +
+    kpi("Attack detection", rt.result.attack_detection_rate == null ? NA : pct(rt.result.attack_detection_rate, 1)) + kpi("False alarms", rt.result.false_alarm_rate == null ? NA : pct(rt.result.false_alarm_rate, 2)) +
+    `</div><p class="hint">New captures use the retrained model (stop and start capture if one is running). The previous model was kept${rt.backup ? " in " + esc(rt.backup) : ""}.</p>` : "";
 }
 async function pageLab(full) {
   await loadScenarios();
+  renderParams();
+  renderMatrix(full).catch(e => { $("mxTable").html = errBox(e); });
   const [pre, jobs, base, run] = await Promise.all([
     full || S.slow % 3 === 0 || !S.pre ? api("/api/pipeline/preflight") : Promise.resolve(S.pre),
     api("/api/trafficlab/jobs").catch(e => ({ error: e.message })), api("/api/trafficlab/baseline"), api("/api/pipeline/status")]);
@@ -859,6 +1043,7 @@ const POL_FIELDS = [["min_confidence", "Min confidence", 0.5, 1, 0.01], ["min_fl
 const HYS_FIELDS = [["release_ratio", "Hold while evidence ≥ (fraction of trigger)", 0.1, 1, 0.05], ["quiet_seconds", "Release after quiet (s)", 10, 7200, 1], ["reengage_cooldown_seconds", "Re-engage cooldown (s)", 0, 7200, 1]];
 function renderPolicy(st) {
   const pol = st.detection_policy; if (!pol) return;
+  if (document.activeElement !== $("polSev")) $("polSev").value = pol.engage_severity || "custom";
   const form = $("polForm");
   if (!S.polDirty && !form.contains(document.activeElement)) {
     const rows = Object.entries(pol.classes).sort(([a], [b]) => a === "default" ? -1 : b === "default" ? 1 : a.localeCompare(b));
@@ -936,6 +1121,14 @@ async function pageDeception() {
   const [st, pol, decoys, dec, inter, lv] = await Promise.all([api("/api/deception/status"), S.policy ? Promise.resolve(S.policy) : api("/api/deception/policy"),
     api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200"), api("/api/deception/live?limit=20")]);
   renderLive(lv);
+  api("/api/live/flow-graph?seconds=180").then(g => flowDiagram("decFlow", g, { emptyTitle: "No traffic in the last 3 minutes", emptyBody: "Attacker → target → decoy paths appear here while an attack runs." })).catch(() => { });
+  const ne = await api("/api/deception/not-engaged?minutes=15");
+  $("decNot").html = !st.enabled ? empty("Automatic deception is disabled", "Nothing is engaged while it is off. Enable it above; it acts on new detections only.") : table([
+    { h: "Last seen", f: r => `${time(r.created_at)} <span class="na">${ago(r.created_at)}</span>` }, { h: "Source", f: r => `<span class="mono">${esc(r.src_ip)}</span>${r.src_pod ? `<br><span class="na mono">${esc(r.src_pod)}</span>` : ""}` },
+    { h: "Threat", f: r => r.attack_class ? (CLASS_COLORS[r.attack_class] ? clsTag(r.attack_class) : esc(r.attack_class)) : "—" },
+    { h: "Flows", num: 1, f: r => fmt(r.evidence_count) }, { h: "Mean conf.", num: 1, f: r => r.max_confidence == null ? "—" : fmt(r.max_confidence, 2) },
+    { h: "Outcome", f: r => pill(r.action.replace("_", " "), r.action === "monitor" || r.action === "await_evidence" ? "idle" : "degraded") }, { h: "Why no decoy", wrap: 1, k: "reason" },
+  ], ne, { emptyTitle: "Every detected source is engaged", emptyBody: "Sources below the thresholds would be listed here with the reason." });
   S.policy = pol;
   const ps = $("decProfile"); if (!ps.options.length) Object.keys(pol.profiles).forEach(p => ps.add(new Option(p, p)));
   $("decEnable").disabled = st.enabled; $("decDisable").disabled = !st.enabled;
@@ -1128,6 +1321,7 @@ $("capStop").onclick = async e => { const b = e.currentTarget; if (await confirm
 $("capProcess").onclick = e => act(e.currentTarget, () => api("/api/live/process?limit=50", { method: "POST" }), r => `Processed ${r.processed.length} PCAP(s): ${r.processed.filter(x => x.status === "classified").length} classified, ${r.processed.filter(x => x.status === "failed").length} failed`);
 $("evalBtn").onclick = e => runEval(e.currentTarget);
 $("labTargets").addEventListener("change", onScenario);
+$("rtBtn").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Retrain the live model on your lab runs?", "Trains on the flows of your own labelled Traffic-lab runs (the newest run of each attack is held out for testing). The current model is kept; new captures use the retrained one. Takes about a minute.")) act(b, () => api("/api/model/retrain-lab", { method: "POST" }), "Retraining started"); };
 $("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: true }) }),
   r => `${r.jobs.length} Job(s) created${r.launch_errors.length ? `, ${r.launch_errors.length} refused` : ""}. ${r.notes.join("; ")}. Waiting for the generator logs to confirm traffic…`);
 $("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: false, auto_stop: false }) }),
@@ -1148,6 +1342,12 @@ document.addEventListener("click", async e => {
   if (t.dataset.rmdecoy && await confirmDlg("Remove decoy?", `${t.dataset.rmdecoy} (Deployment and Service) is deleted from ids-deception. Its last interactions are collected first.`)) act(t, () => api("/api/deception/decoys/" + encodeURIComponent(t.dataset.rmdecoy), { method: "DELETE" }), "Decoy removed");
 });
 $("polForm").addEventListener("input", () => { S.polDirty = true; });
+$("polSev").addEventListener("change", async e => {
+  const sel = e.currentTarget; sel.disabled = true;
+  try { const r = await api("/api/deception/detection-policy", { method: "PUT", body: { engage_severity: sel.value } });
+    toast(`Deception now engages at ${r.engage_severity === "custom" ? "the per-class thresholds" : r.engage_severity + " severity and above"} (from the next cycle)`, "ok"); await refresh(true); }
+  catch (err) { toast(err.message, "bad"); } finally { sel.disabled = false; }
+});
 $("polSave").onclick = e => act(e.currentTarget, async () => { const r = await api("/api/deception/detection-policy", { method: "PUT", body: policyBody() }); S.polDirty = false; return r; }, "Thresholds saved; used from the next cycle");
 $("polReset").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Reset thresholds?", "Saved overrides are deleted and the defaults from config/live.yaml apply again.")) act(b, async () => { const r = await api("/api/deception/detection-policy", { method: "PUT", body: { reset: true } }); S.polDirty = false; return r; }, "Thresholds reset to defaults"); };
 $("decEnable").onclick = e => act(e.currentTarget, () => api("/api/deception/enable", { method: "POST" }), "Automatic deception enabled (acts on new evidence only)");

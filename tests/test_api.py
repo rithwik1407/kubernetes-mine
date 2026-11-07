@@ -18,7 +18,8 @@ REPO = Path(__file__).resolve().parents[1]
 def client(tmp_path_factory):
     tmp = tmp_path_factory.mktemp("api")
     cfg = yaml.safe_load((REPO / "config" / "live.yaml").read_text())
-    cfg["paths"].update(database=str(tmp / "ids.sqlite"), pcap_dir=str(tmp / "pcap"), flows_dir=str(tmp / "flows"))
+    cfg["paths"].update(database=str(tmp / "ids.sqlite"), pcap_dir=str(tmp / "pcap"), flows_dir=str(tmp / "flows"),
+                        local_model_dir=str(tmp / "no-local-model"))
     cfg["capture"].update(state_file=str(tmp / "state.json"), pid_file=str(tmp / "capture.pid"))
     cfg["deception"]["kubeconfig"] = str(tmp / "no.kubeconfig")
     (tmp / "live.yaml").write_text(yaml.safe_dump(cfg))

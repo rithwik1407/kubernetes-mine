@@ -11,6 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace as NS
 
 import pandas as pd
+import pytest
 
 from live import allowlist, db, flowcontext, pipeline, queries
 from live.behavior import flow_bursts
@@ -137,7 +138,7 @@ def test_failure_reason_exit_code_and_log():
 def test_multi_select_launches_one_job_per_attack_and_target(cfg, monkeypatch):
     launched = []
     monkeypatch.setattr(pipeline.cap, "read_state", lambda c=None: {"running": True})
-    monkeypatch.setattr(pipeline, "launch", lambda sc, tgt, count, delay, cfg, run_id=None:
+    monkeypatch.setattr(pipeline, "launch", lambda sc, tgt, count, delay, cfg, run_id=None, params=None:
                         launched.append((sc, tgt, run_id)) or {"job": f"j-{len(launched)}", "target": f"{tgt}:1",
                                                                "target_label": tgt, "expect_class": "X"})
     run = pipeline.run_scenarios(["port_scan", "web_attack", "decoy_probe"], ["nodered", "grafana"],
@@ -399,3 +400,70 @@ def test_threat_counter_shows_current_run_then_clears(cfg):
         db.kv_set(c, "pipeline_runs", json.dumps([run]))
     t = queries.threat_counter(cfg)
     assert t["run"] is None and t["total"]["malicious"] == 3
+
+
+# --- severity engagement, generator params, detection matrix, flow graph ------------
+def test_generator_params_are_validated_and_become_env(cfg):
+    from live import trafficlab
+    job = trafficlab.build_job("brute_force", cfg, "grafana.target-apps.svc.cluster.local:3000",
+                               params={"concurrency": 4, "duration_s": 60, "target_port": 8080, "login_path": "/api/login"})
+    env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["CONCURRENCY"] == "4" and env["TIME_BUDGET_S"] == "60" and env["LOGIN_PATH"] == "/api/login"
+    assert env["TARGET"] == "grafana.target-apps.svc.cluster.local:8080"
+    assert [e["name"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]].count("LOGIN_PATH") == 1
+    for bad in ({"concurrency": 99}, {"login_path": "/x; rm -rf /"}, {"payload_set": "evil"}, {"nope": 1},
+                {"port_start": 900, "port_end": 10}):
+        with pytest.raises(trafficlab.TrafficLabError):
+            trafficlab.check_params(bad)
+
+
+def test_detection_matrix_uses_job_pods_as_ground_truth(cfg):
+    now = datetime.now(timezone.utc).isoformat()
+    with db.connect(cfg["paths"]["database"]) as c:
+        for cls, n in (("BruteForce", 8), ("BENIGN", 2)):
+            for _ in range(n):
+                db.insert_row(c, "detections", predicted_class=cls, confidence=0.9, is_malicious=int(cls != "BENIGN"),
+                              source="live", detected_at=now, session_id=5, src_ip="10.42.0.50", dst_ip="10.42.0.7",
+                              src_port=40000, dst_port=3000, lab_scenario="brute_force", model="k8s-lab-live")
+        db.insert_row(c, "detections", predicted_class="BENIGN", confidence=0.9, is_malicious=0, source="live",
+                      detected_at=now, session_id=5, src_ip="10.42.0.50", dst_ip="10.43.0.10", src_port=5353,
+                      dst_port=53, lab_scenario="brute_force", model="k8s-lab-live")          # DNS: left out
+        db.kv_set(c, "pipeline_runs", json.dumps([{"id": "r", "started_at": now, "session_id": 5, "jobs": [
+            {"scenario": "brute_force", "pod_ip": "10.42.0.50", "expect_class": "BruteForce",
+             "target_label": "grafana", "target": "grafana.target-apps.svc.cluster.local:3000"}]}]))
+    m = queries.detection_matrix(cfg)["cells"]
+    assert len(m) == 1 and m[0]["target"] == "grafana" and m[0]["flows"] == 10 and m[0]["detection_rate"] == 0.8
+
+
+def test_flow_graph_points_attacker_to_target_to_decoy(cfg):
+    now = datetime.now(timezone.utc).isoformat()
+    pods = {"10.42.0.50": {"pod": "atk", "namespace": "ids-traffic", "node": "n1", "labels": {}},
+            "10.42.0.7": {"pod": "grafana-1", "namespace": "target-apps", "node": "n1", "labels": {}},
+            "10.42.0.90": {"pod": "decoy-web-portal-n1-x", "namespace": "ids-deception", "node": "n1", "labels": {}}}
+    with db.connect(cfg["paths"]["database"]) as c:
+        for src, dst, cls in [("10.42.0.50", "10.42.0.7", "BruteForce")] * 6 + [("10.42.0.90", "10.42.0.50", "BENIGN")] * 3:
+            db.insert_row(c, "detections", predicted_class=cls, confidence=0.95, is_malicious=int(cls != "BENIGN"),
+                          source="live", detected_at=now, src_ip=src, dst_ip=dst, src_port=1, dst_port=2, model="m")
+    g = queries.flow_graph(60, 10, cfg, pods=pods)
+    roles = {n["id"]: n["role"] for n in g["nodes"]}
+    assert roles == {"10.42.0.50": "attacker", "10.42.0.7": "target", "10.42.0.90": "decoy"}
+    e = {(x["src"], x["dst"]): x for x in g["edges"]}
+    assert e[("10.42.0.50", "10.42.0.7")]["severity"] == "high"
+    assert ("10.42.0.50", "10.42.0.90") in e and e[("10.42.0.50", "10.42.0.90")]["redirect"]   # reply flipped forward
+
+
+def test_target_replying_to_a_lab_pod_is_never_engaged(cfg):
+    from live import podinfo
+    from live.controller import MapeKController
+    pods = podinfo.build(
+        [NS(metadata=NS(name="grafana-1", namespace="target-apps", labels={"app": "grafana"}, creation_timestamp=None),
+            spec=NS(node_name="vm"), status=NS(pod_ip="10.42.0.195", phase="Running")),
+         NS(metadata=NS(name="traffic-slow-dos-x", namespace="ids-traffic", labels={}, creation_timestamp=None),
+            spec=NS(node_name="vm"), status=NS(pod_ip="10.42.0.220", phase="Running"))], [])
+    podinfo._CACHE.update(at=float("inf"), value=pods, error=None)
+    ctl = MapeKController(cfg, manager=None)
+    a = {"trigger": "behavior", "src_ip": "10.42.0.195", "target_ip": "10.42.0.220", "attack_class": "Reconnaissance (port sweep)",
+         "assessment": "high", "actionable": True, "simulated": False, "reason": "port sweep", "evidence_count": 1}
+    with db.connect(cfg["paths"]["database"]) as c:
+        out = ctl.engage(c, 1, [a])
+    assert out[0]["actionable"] is False and out[0]["assessment"] == "reply"

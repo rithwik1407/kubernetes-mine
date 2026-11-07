@@ -143,8 +143,9 @@ def model_info(which: str = "live"):
         raise HTTPException(400, "which must be 'live' or 'scorer'")
     if not LIVE_ENABLED:
         raise HTTPException(503, f"live features disabled: {_LIVE_IMPORT_ERROR}")
-    from live.config import get_path, load_config
-    return _model_info(get_path("model_dir", load_config()))
+    from live.config import load_config
+    from live.predictor import active_model_dir
+    return _model_info(active_model_dir(load_config()))
 
 
 @app.get("/api/model/cm/{model}/{name}")

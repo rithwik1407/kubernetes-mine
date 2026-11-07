@@ -92,10 +92,12 @@ def _update_run(run_id: str, cfg: dict[str, Any], **fields) -> dict[str, Any] | 
 
 def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count: int | None = None,
                   delay: float | None = None, auto_capture: bool = True, auto_stop: bool = True,
-                  cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+                  cfg: dict[str, Any] | None = None, params: dict[str, Any] | None = None) -> dict[str, Any]:
     """Launch one bounded Job per (scenario, target) at the same time, each labelled with its
     expected class, and (by default) stop capture once they have all finished and been scored."""
     cfg = cfg or load_config()
+    from live.trafficlab import GEN_PARAMS, check_params
+    params = check_params(params)            # refuse bad parameters before capture starts
     started = _now()
     run_id = "run-" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     notes: list[str] = []
@@ -119,10 +121,13 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
     jobs, errors = [], []
     for sc, tgt in pairs:
         try:
-            j = launch(sc, tgt, count, delay, cfg, run_id=run_id)
+            mode = cfg["traffic_lab"]["scenarios"][sc]["mode"]
+            mine = {k: v for k, v in params.items()
+                    if GEN_PARAMS[k]["modes"] is None or mode in GEN_PARAMS[k]["modes"]}
+            j = launch(sc, tgt, count, delay, cfg, run_id=run_id, params=mine)
             jobs.append({"job": j["job"], "scenario": sc, "target": j["target"], "target_label": j.get("target_label", tgt),
                          "expect_class": j.get("expect_class", cfg["traffic_lab"]["scenarios"][sc].get("expect_class")),
-                         "count": j.get("count"), "delay": j.get("delay"), "note": j.get("note")})
+                         "count": j.get("count"), "delay": j.get("delay"), "params": mine, "note": j.get("note")})
         except TrafficLabError as e:
             errors.append({"scenario": sc, "target": tgt, "error": str(e)})
     if not jobs:   # nothing launched: surface the first error to the API (400/503)

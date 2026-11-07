@@ -27,6 +27,7 @@ import os
 import random
 import socket
 import sys
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -52,6 +53,10 @@ PORT_END = int(os.environ.get("PORT_END", "1024"))
 SLOW_CONNS = int(os.environ.get("SLOW_CONNS", "200"))
 SLOW_HOLD_S = float(os.environ.get("SLOW_HOLD_S", "25"))
 LOGIN_PATH = os.environ.get("LOGIN_PATH", "/login")
+# Parallel workers for port_scan / brute_force / web_attack (each still waits DELAY between
+# its own actions, so the total rate is about CONCURRENCY / DELAY per second).
+CONCURRENCY = max(1, min(16, int(os.environ.get("CONCURRENCY", "1"))))
+PAYLOAD_SET = os.environ.get("PAYLOAD_SET", "mixed")   # web_attack: mixed | sqli | xss | traversal
 # Stop cleanly before the Job's activeDeadlineSeconds. Without this, a run that is
 # slower than expected (targets not answering, every connect waiting for its timeout)
 # is killed by Kubernetes, its pod is deleted and the only trace is "DeadlineExceeded".
@@ -74,12 +79,36 @@ _REDIRECT = {"checked": 0.0, "to": None, "only": frozenset()}
 _RESOLVED: dict[str, str | None] = {}
 
 
+_EMIT_LOCK = threading.Lock()
+
+
 def emit(**fields) -> None:
     fields["ts"] = datetime.now(timezone.utc).isoformat()
     fields["mode"] = MODE
-    if fields.get("action") not in _NOT_COUNTED:
-        _COUNTS["errors" if fields.get("error") else "ok"] += 1
-    print(json.dumps(fields), flush=True)
+    with _EMIT_LOCK:
+        if fields.get("action") not in _NOT_COUNTED:
+            _COUNTS["errors" if fields.get("error") else "ok"] += 1
+        print(json.dumps(fields), flush=True)
+
+
+def parallel(items, fn) -> None:
+    """Run fn(item) for every item with CONCURRENCY workers, each pausing DELAY after an item."""
+    items = list(items)
+
+    def worker(k: int) -> None:
+        for item in items[k::CONCURRENCY]:
+            if out_of_time():
+                return
+            fn(item)
+            time.sleep(DELAY)
+    if CONCURRENCY == 1:
+        worker(0)
+        return
+    threads = [threading.Thread(target=worker, args=(k,), daemon=True) for k in range(CONCURRENCY)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
 
 def out_of_time() -> bool:
@@ -207,11 +236,10 @@ def run_web_recon() -> None:
 def run_port_scan() -> None:
     host, _ = host_port(TARGET, 0)
     lo, hi = max(1, PORT_START), min(65535, PORT_END)
-    emit(action="start", scenario="port_scan", host=host, port_start=lo, port_end=hi)
-    opened = 0
-    for port in range(lo, hi + 1):
-        if out_of_time():
-            break
+    emit(action="start", scenario="port_scan", host=host, port_start=lo, port_end=hi, concurrency=CONCURRENCY)
+    opened = [0]
+
+    def probe(port: int) -> None:
         s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         s.settimeout(SCAN_TIMEOUT)
         dest = aim(host, port)                 # (decoy host, decoy port) once redirected
@@ -219,7 +247,7 @@ def run_port_scan() -> None:
         try:
             rc = s.connect_ex(dest)
             if rc == 0:
-                opened += 1
+                opened[0] += 1
                 if extra:                      # redirected: grab a banner, as nmap -sV would, so the decoy logs it
                     try:
                         s.sendall(f"HEAD / HTTP/1.0\r\nHost: {host}\r\nX-Scan-Port: {port}\r\n\r\n".encode())
@@ -235,8 +263,8 @@ def run_port_scan() -> None:
             emit(action="port_error", host=host, port=port, error=type(e).__name__, **extra)
         finally:
             s.close()
-        time.sleep(DELAY)
-    emit(action="done", scenario="port_scan", open_ports=opened)
+    parallel(range(lo, hi + 1), probe)
+    emit(action="done", scenario="port_scan", open_ports=opened[0])
 
 
 # --- slow_dos -----------------------------------------------------------------------
@@ -287,12 +315,10 @@ def run_brute_force() -> None:
     CIC 'BruteForce' class and the flow-burst detector are meant to catch.
     """
     host, port = host_port(TARGET, 22)
-    emit(action="start", scenario="brute_force", host=host, port=port, attempts=COUNT)
+    emit(action="start", scenario="brute_force", host=host, port=port, attempts=COUNT, concurrency=CONCURRENCY)
     USERS = ["admin", "root", "test", "user", "guest"]
     if port in (22, 2222):                       # SSH-style: repeated TCP connects to the SSH port
-        for i in range(COUNT):
-            if out_of_time():
-                break
+        def ssh(i: int) -> None:
             s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             s.settimeout(TIMEOUT)
             try:
@@ -303,12 +329,11 @@ def run_brute_force() -> None:
                 emit(action="ssh_error", host=host, port=port, error=type(e).__name__)
             finally:
                 s.close()
-            time.sleep(DELAY)
+        parallel(range(COUNT), ssh)
     else:                                        # HTTP login attempts (Grafana-style JSON /login)
         base = f"http://{host}:{port}"
-        for i in range(COUNT):
-            if out_of_time():
-                break
+
+        def login(i: int) -> None:
             user = random.choice(USERS)
             data = json.dumps({"user": user, "username": user, "password": f"wrong-{i}"}).encode()
             url = aim_url(base) + LOGIN_PATH
@@ -321,29 +346,27 @@ def run_brute_force() -> None:
                 emit(action="login_attempt", url=url, status=e.code, n=i)
             except Exception as e:  # noqa: BLE001
                 emit(action="login_error", url=url, error=type(e).__name__)
-            time.sleep(DELAY)
+        parallel(range(COUNT), login)
     emit(action="done", scenario="brute_force")
 
 
 # --- web_attack ---------------------------------------------------------------------
 # Signature-like strings sent as query parameters to a test endpoint. They are not
 # executed anywhere; they exist so the captured flows resemble the CIC WebAttack class.
-WEB_PAYLOADS = [
-    "/?q=1' OR '1'='1", "/?id=1 UNION SELECT null--", "/search?q=<script>alert(1)</script>",
-    "/?name=<img src=x onerror=1>", "/?file=../../etc/passwd", "/?cmd=;id",
-    "/login?user=admin'--", "/?q=%27%20OR%201=1--", "/comment?text=<svg/onload=1>",
-]
+PAYLOAD_SETS = {
+    "sqli": ["/?q=1' OR '1'='1", "/?id=1 UNION SELECT null--", "/login?user=admin'--", "/?q=%27%20OR%201=1--"],
+    "xss": ["/search?q=<script>alert(1)</script>", "/?name=<img src=x onerror=1>", "/comment?text=<svg/onload=1>"],
+    "traversal": ["/?file=../../etc/passwd", "/?cmd=;id", "/static/..%2f..%2fetc/passwd"],
+}
+PAYLOAD_SETS["mixed"] = PAYLOAD_SETS["sqli"] + PAYLOAD_SETS["xss"] + PAYLOAD_SETS["traversal"][:2]
+WEB_PAYLOADS = PAYLOAD_SETS.get(PAYLOAD_SET, PAYLOAD_SETS["mixed"])
 
 
 def run_web_attack() -> None:
     host, port = host_port(TARGET, 1880)
     base = f"http://{host}:{port}"
-    emit(action="start", scenario="web_attack", target=base, count=COUNT)
-    for i in range(COUNT):
-        if out_of_time():
-            break
-        http_get(base, random.choice(WEB_PAYLOADS))
-        time.sleep(DELAY)
+    emit(action="start", scenario="web_attack", target=base, count=COUNT, concurrency=CONCURRENCY, payloads=PAYLOAD_SET)
+    parallel(range(COUNT), lambda i: http_get(base, random.choice(WEB_PAYLOADS)))
     emit(action="done", scenario="web_attack")
 
 

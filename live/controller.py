@@ -114,14 +114,25 @@ class MapeKController:
         for cls, vals in (ov.get("classes") or {}).items():
             base.setdefault(cls, dict(base["default"])).update(vals)
         hyst.update(ov.get("hysteresis") or {})
-        return {"classes": base, "hysteresis": hyst, "overridden": bool(ov), "updated_at": ov.get("updated_at")}
+        th = self.d.get("thresholds") or {}
+        levels = {"high": float(th.get("high_confidence", 0.9)), "medium": float(th.get("medium_confidence", 0.6))}
+        sev = ov.get("engage_severity") or self.d.get("engage_severity") or "custom"
+        return {"classes": base, "hysteresis": hyst, "overridden": bool(ov), "updated_at": ov.get("updated_at"),
+                "engage_severity": sev, "severity_levels": levels}
 
     def class_policy(self, cls: str) -> dict[str, Any]:
-        pol = self.detection_policy()["classes"]
-        return {**pol["default"], **pol.get(cls, {})}
+        """Per-class trigger. With engage_severity high/medium, every flow counts from that
+        severity's confidence (and the mean must reach it too); min_flows and the window
+        still come from the class, so a single flow never triggers."""
+        dp = self.detection_policy()
+        pol = {**dp["classes"]["default"], **dp["classes"].get(cls, {})}
+        if dp["engage_severity"] in dp["severity_levels"]:
+            t = dp["severity_levels"][dp["engage_severity"]]
+            pol.update(min_confidence=t, mean_confidence=t)
+        return pol
 
     def set_detection_policy(self, classes: dict[str, dict[str, Any]] | None, hysteresis: dict[str, Any] | None,
-                             reset: bool = False) -> dict[str, Any]:
+                             reset: bool = False, engage_severity: str | None = None) -> dict[str, Any]:
         """Validate and store dashboard overrides. Raises ValueError with the offending field."""
         if reset:
             with self._conn() as c:
@@ -152,6 +163,8 @@ class MapeKController:
             bad = set(vals) - set(self.POLICY_KEYS)
             if bad:
                 raise ValueError(f"unknown field(s) for {cls}: {sorted(bad)}")
+        if engage_severity is not None and engage_severity not in ("high", "medium", "custom"):
+            raise ValueError("engage_severity must be high, medium or custom")
         for k, v in (hysteresis or {}).items():
             if k not in ("release_ratio", "quiet_seconds", "reengage_cooldown_seconds"):
                 raise ValueError(f"unknown hysteresis field {k!r}")
@@ -161,6 +174,8 @@ class MapeKController:
             for cls, vals in out["classes"].items():
                 prev.setdefault("classes", {}).setdefault(cls, {}).update(vals)
             prev.setdefault("hysteresis", {}).update(out["hysteresis"])
+            if engage_severity:
+                prev["engage_severity"] = engage_severity
             prev["updated_at"] = iso(now_utc())
             db.kv_set(c, "detection_policy_override", json.dumps(prev))
         log.info("detection policy updated: %s", out)
@@ -297,6 +312,16 @@ class MapeKController:
             if src in self.decoy_ips():
                 out.append({**a, "actionable": False, "assessment": "decoy",
                             "reason": a["reason"] + f"; {src} is one of our decoy pods (its replies), never acted on"})
+                continue
+            tgt_pod, src_pod = self.pod_of(a.get("target_ip")), self.pod_of(src)
+            lab_ns = self.cfg["traffic_lab"]["namespace"]
+            if (a["actionable"] and tgt_pod and tgt_pod["namespace"] == lab_ns
+                    and (src_pod is None or src_pod["namespace"] != lab_ns)):
+                # a lab service answering a generator pod (e.g. a target replying to many
+                # slow-DoS connections looks like a sweep of the generator's ports)
+                out.append({**a, "actionable": False, "assessment": "reply",
+                            "reason": a["reason"] + f"; {src} is answering traffic-lab pod {tgt_pod['pod']} "
+                                                    "(reply traffic of a lab run), never acted on"})
                 continue
             eng = c.execute("SELECT * FROM engagements WHERE src_ip = ? AND state = 'active'", (src,)).fetchone()
             if a["actionable"]:
@@ -554,7 +579,29 @@ class MapeKController:
                                     "reason": a["reason"] + f"; policy {a['attack_class']} -> {profile}"})
                     active_count += 1
                 planned.add(name)
+            self._ensure_a_decoy(c, a, actions, decoys)
         return actions
+
+    def _ensure_a_decoy(self, c, a: dict[str, Any], actions: list[dict[str, Any]], decoys: dict[str, dict]) -> None:
+        """An engaged source must never be left without a decoy: when every profile was
+        suppressed (decoy limit, deployment cooldown), reuse a running decoy, preferring
+        one on the attacked node, so the source can still be redirected."""
+        eid = a.get("engagement_id")
+        if not eid:
+            return
+        mine = [x for x in actions if x.get("engagement_id") == eid]
+        if any(x["action"] in ("deploy", "refresh", "scale") for x in mine):
+            return
+        row = c.execute("SELECT decoys FROM engagements WHERE id = ?", (eid,)).fetchone()
+        if row and json.loads(row["decoys"] or "[]"):
+            return
+        if not decoys:
+            return
+        node = a.get("target_node")
+        pick = sorted(decoys.values(), key=lambda d: (d.get("node") != node, d["status"] != "active", d["id"]))[0]
+        actions.append({**a, "action": "reuse", "profile": pick["profile"], "name": pick["name"], "node": pick.get("node"),
+                        "reason": a["reason"] + f"; no new decoy allowed now ({', '.join(sorted({x['action'] for x in mine})) or 'no profile'}), "
+                                                f"reusing running decoy {pick['name']} (node {pick.get('node') or 'any'}) so the source is still redirected"})
 
     def _recently_removed(self, c, profile: str, now: datetime) -> bool:
         t = parse(c.execute("SELECT MAX(removed_at) FROM decoys WHERE profile = ?", (profile,)).fetchone()[0])
@@ -601,7 +648,9 @@ class MapeKController:
                 result = "ok"
             db.update_row(c, "decisions", dec_id, result=result,
                           reason=a["reason"] + (f" [failed: {error}]" if error else ""))
-            if result == "ok" and a["action"] in ("deploy", "scale", "refresh"):
+            if a["action"] == "reuse":
+                result = "ok"
+            if result == "ok" and a["action"] in ("deploy", "scale", "refresh", "reuse"):
                 self._link_decoy(c, a.get("engagement_id"), a.get("name"))
             results.append({"decision_id": dec_id, "action": a["action"], "profile": a.get("profile"), "result": result})
         return results

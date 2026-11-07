@@ -111,9 +111,41 @@ def test_low_mean_confidence_does_not_trigger(cfg):
     mgr = FakeManager()
     ctl = MapeKController(cfg, manager=mgr)
     ctl.set_enabled(True)
+    ctl.set_detection_policy(None, None, engage_severity="custom")   # per-class values
     _flows("DoS", 30, 0.81)          # enough flows, each >= 0.80, but mean 0.81 < 0.85
     ctl.run_cycle()
     assert mgr.deployed == {}
+
+
+def test_medium_severity_engages_and_high_does_not(cfg):
+    """Default engage_severity=medium: 10 PortScan flows at 0.70 (Threats page "medium")
+    create a decoy; with engage_severity=high the same evidence does not."""
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    ctl.set_detection_policy(None, None, engage_severity="high")
+    _flows("PortScan", 12, 0.70)
+    ctl.run_cycle()
+    assert mgr.deployed == {}
+    ctl.set_detection_policy(None, None, engage_severity="medium")
+    _flows("PortScan", 12, 0.70, src="10.42.0.10")
+    ctl.run_cycle()
+    assert mgr.deployed and ctl.engagements()[0]["src_ip"] == "10.42.0.10"
+    assert ctl.class_policy("PortScan")["min_confidence"] == 0.6
+
+
+def test_engagement_reuses_a_running_decoy_when_new_ones_are_blocked(cfg):
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    ctl.d["max_active_decoys"] = 1
+    _flows("PortScan", 12, 0.97)
+    ctl.run_cycle()
+    assert len(mgr.deployed) == 1
+    _flows("BruteForce", 12, 0.97, src="10.42.0.11")   # limit reached: no new decoy allowed
+    ctl.run_cycle()
+    e = next(x for x in ctl.engagements() if x["src_ip"] == "10.42.0.11")
+    assert e["decoys"] == list(mgr.deployed)              # linked to the running decoy instead
 
 
 def test_allowlisted_source_is_never_acted_on(cfg):

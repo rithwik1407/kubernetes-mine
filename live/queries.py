@@ -344,3 +344,156 @@ def threat_counter(cfg=None) -> dict[str, Any]:
         tot = {r[0]: r[1] for r in c.execute(
             "SELECT predicted_class, COUNT(*) FROM detections WHERE is_malicious = 1 AND simulated = 0 GROUP BY predicted_class")}
     return {"run": live, "total": {"malicious": sum(tot.values()), "by_class": tot}}
+
+
+def not_engaged(minutes: int = 15, cfg=None) -> list[dict[str, Any]]:
+    """Sources with recent detections that are NOT engaged, with the controller's last reason
+    (below the severity/flow threshold, cooldown, decoy limit, allowlisted, decoy pod ...)."""
+    cfg = cfg or load_config()
+    since = (datetime.now(timezone.utc) - timedelta(minutes=int(minutes))).isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT d.* FROM decisions d JOIN (SELECT src_ip, MAX(id) mid FROM decisions WHERE created_at >= ? "
+            "AND src_ip IS NOT NULL AND trigger IN ('ml', 'behavior') GROUP BY src_ip) m ON d.id = m.mid "
+            "WHERE d.src_ip NOT IN (SELECT src_ip FROM engagements WHERE state = 'active') ORDER BY d.id DESC",
+            (since,))]
+    keep = ("id", "created_at", "src_ip", "trigger", "attack_class", "assessment", "max_confidence",
+            "evidence_count", "action", "result", "reason")
+    return [{k: r.get(k) for k in keep} for r in rows if r.get("action") not in ("engage", "redirect")]
+
+
+def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
+    """Per scenario x target: how many of the attack pod's flows the model put in the
+    expected class (detection rate) and in any attack class, from this lab's own runs.
+    Ground truth = the Traffic-lab Job's pod IP in its capture session; DNS is left out."""
+    cfg = cfg or load_config()
+    cells: dict[tuple[str, str], dict[str, Any]] = {}
+    with db.connect(db.db_path(cfg)) as c:
+        row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
+        runs = json.loads(row[0]) if row else []
+        for run in runs[:max_runs]:
+            sid = run.get("session_id")
+            for j in run.get("jobs", []):
+                ip, sc, exp = j.get("pod_ip"), j.get("scenario"), j.get("expect_class")
+                if not (sid and ip and sc):
+                    continue
+                r = c.execute(
+                    "SELECT COUNT(*) n, SUM(predicted_class = ?) hit, SUM(predicted_class != 'BENIGN') mal, "
+                    "GROUP_CONCAT(DISTINCT model) models FROM detections WHERE session_id = ? AND lab_scenario = ? "
+                    "AND (src_ip = ? OR dst_ip = ?) AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53",
+                    (exp or "BENIGN", sid, sc, ip, ip)).fetchone()
+                if not r["n"]:
+                    continue
+                tgt = (j.get("target_label") or j.get("target") or "?").split(".")[0].split(":")[0]
+                cell = cells.setdefault((sc, tgt), {"scenario": sc, "target": tgt, "expect_class": exp, "runs": 0,
+                                                     "flows": 0, "detected": 0, "malicious": 0, "models": set(),
+                                                     "last_run": None, "last_rate": None})
+                cell["runs"] += 1
+                cell["flows"] += r["n"]
+                cell["detected"] += r["hit"] or 0
+                cell["malicious"] += r["mal"] or 0
+                cell["models"] |= set((r["models"] or "").split(",")) - {""}
+                if cell["last_run"] is None:              # runs are newest first
+                    cell["last_run"], cell["last_rate"] = run["started_at"], (r["hit"] or 0) / r["n"]
+    out = []
+    for cell in cells.values():
+        n = cell["flows"]
+        out.append({**cell, "models": sorted(cell["models"]),
+                    "detection_rate": cell["detected"] / n if n else None,
+                    "attack_rate": cell["malicious"] / n if n else None})
+    out.sort(key=lambda x: (x["scenario"], x["target"]))
+    return {"cells": out, "model_in_use": cfg["paths"]["model_dir"].rstrip("/").split("/")[-1]}
+
+
+def _severity(conf: float | None, malicious: bool, th: dict[str, Any]) -> str:
+    if not malicious:
+        return "benign"
+    if conf is not None and conf >= float(th.get("high_confidence", 0.9)):
+        return "high"
+    if conf is not None and conf >= float(th.get("medium_confidence", 0.6)):
+        return "medium"
+    return "low"
+
+
+def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | None = None,
+               engagements: list[dict] | None = None) -> dict[str, Any]:
+    """Who talked to whom in the last `seconds`: nodes (pod, namespace, node, role) and
+    edges (flows, packets, malicious flows, class, severity), for the flow diagrams.
+    Roles: attacker (source of malicious flows), client, target, decoy. Control-plane
+    (allowlisted) and DNS flows are left out; edges always point attacker/client ->
+    target -> decoy."""
+    cfg = cfg or load_config()
+    th = cfg["deception"].get("thresholds", {})
+    since = (datetime.now(timezone.utc) - timedelta(seconds=int(seconds))).isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT src_ip, dst_ip, COUNT(*) flows, COALESCE(SUM(packets), 0) packets, SUM(is_malicious) mal, "
+            "MAX(CASE WHEN is_malicious = 1 THEN confidence END) conf, MAX(detected_at) last, "
+            "(SELECT predicted_class FROM detections d2 WHERE d2.src_ip = d.src_ip AND d2.dst_ip = d.dst_ip "
+            " AND d2.is_malicious = 1 AND d2.detected_at >= ? GROUP BY predicted_class ORDER BY COUNT(*) DESC LIMIT 1) cls "
+            "FROM detections d WHERE detected_at >= ? AND simulated = 0 AND allowlisted IS NULL "
+            "AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 AND src_ip IS NOT NULL AND dst_ip IS NOT NULL "
+            "GROUP BY src_ip, dst_ip", (since, since))]
+    if pods is None:
+        from live import podinfo
+        pods = podinfo.get(cfg)
+    decoy_ns = cfg["deception"]["namespace"]
+    # an "attacker" is a source with a real share of malicious flows (or an engaged one); a
+    # client with a stray misclassified flow stays a client (its edge still shows the severity)
+    per_src: dict[str, list[int]] = {}
+    for r in rows:
+        t = per_src.setdefault(r["src_ip"], [0, 0])
+        t[0] += r["mal"] or 0
+        t[1] += r["flows"]
+    attackers = {ip for ip, (m, n) in per_src.items() if m >= 5 and m >= 0.2 * n}
+    for e in engagements or []:
+        if e.get("state") == "active":
+            attackers.add(e["src_ip"])
+
+    def role(ip: str) -> str:
+        p = pods.get(ip)
+        if p and p["namespace"] == decoy_ns:
+            return "decoy"
+        return "attacker" if ip in attackers else None
+
+    rank = {"attacker": 0, "client": 0, "target": 1, "decoy": 2}
+    edges: dict[tuple[str, str], dict[str, Any]] = {}
+    for r in rows:
+        a, b = r["src_ip"], r["dst_ip"]
+        ra, rb = role(a) or "client", role(b) or "target"
+        if rank[ra] > rank[rb]:                     # a reply recorded backwards: point it forward
+            a, b, ra, rb = b, a, rb, ra
+        e = edges.setdefault((a, b), {"src": a, "dst": b, "flows": 0, "packets": 0, "malicious": 0, "conf": None,
+                                      "class": None, "last": None})
+        e["flows"] += r["flows"]
+        e["packets"] += r["packets"]
+        e["malicious"] += r["mal"] or 0
+        if r["conf"] is not None and (e["conf"] is None or r["conf"] > e["conf"]):
+            e["conf"], e["class"] = r["conf"], r["cls"]
+        e["last"] = max(filter(None, [e["last"], r["last"]]))
+    for e in engagements or []:                      # the redirect path, even before flows arrive
+        rd = e.get("redirect") or {}
+        if e.get("state") != "active" or not rd.get("applied"):
+            continue
+        for dip in e.get("decoy_pod_ips") or []:
+            if (e["src_ip"], dip) not in edges and dip in pods:
+                edges[(e["src_ip"], dip)] = {"src": e["src_ip"], "dst": dip, "flows": 0, "packets": 0, "malicious": 0,
+                                             "conf": None, "class": None, "last": None, "redirect": True}
+                break
+    chosen = sorted(edges.values(), key=lambda e: (-(e["malicious"] > 0), -e["flows"]))[:max_edges]
+    for e in chosen:
+        e["severity"] = _severity(e["conf"], e["malicious"] > 0, th)
+        e["redirect"] = e.get("redirect") or (pods.get(e["dst"], {}).get("namespace") == decoy_ns)
+    ips = {x for e in chosen for x in (e["src"], e["dst"])}
+    nodes = []
+    for ip in sorted(ips):
+        p = pods.get(ip)
+        r = role(ip) or ("target" if any(e["dst"] == ip for e in chosen) else "client")
+        sev = max((e["severity"] for e in chosen if ip in (e["src"], e["dst"])),
+                  key=["benign", "low", "medium", "high"].index, default="benign")
+        nodes.append({"id": ip, "ip": ip, "role": r, "severity": sev,
+                      "label": p["pod"] if p else ip, "namespace": p["namespace"] if p else None,
+                      "node": p["node"] if p else None,
+                      "scenario": (p.get("labels") or {}).get("scenario") if p else None})
+    return {"seconds": int(seconds), "since": since, "nodes": nodes, "edges": chosen,
+            "truncated": max(0, len(edges) - len(chosen))}

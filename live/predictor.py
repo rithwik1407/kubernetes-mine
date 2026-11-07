@@ -47,6 +47,19 @@ def _col(df: pd.DataFrame, name: str, dtype: str) -> pd.Series:
     return s.mask(s == "", pd.NA)
 
 
+def active_model_dir(cfg: dict[str, Any]) -> Path:
+    """The model the live pipeline uses: a model retrained on this machine's own lab runs
+    (paths.local_model_dir, written by the dashboard's Retrain button, not in git) wins,
+    then paths.model_dir, then paths.fallback_model_dir."""
+    paths = cfg.get("paths", {})
+    for key in ("local_model_dir", "model_dir", "fallback_model_dir"):
+        if paths.get(key) and (get_path(key, cfg) / "best_model.joblib").is_file():
+            if key == "fallback_model_dir":
+                log.warning("no model in %s, using fallback %s", paths.get("model_dir"), paths[key])
+            return get_path(key, cfg)
+    return get_path("model_dir", cfg)
+
+
 class FlowPredictor:
     """Loads models/<dir>/best_model.joblib (a dict of model, features, classes)."""
 
@@ -72,12 +85,7 @@ class FlowPredictor:
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None = None) -> "FlowPredictor":
         cfg = cfg or load_config()
-        primary = get_path("model_dir", cfg)
-        if not (primary / "best_model.joblib").is_file() and cfg.get("paths", {}).get("fallback_model_dir"):
-            fallback = get_path("fallback_model_dir", cfg)
-            log.warning("no model in %s, using fallback %s", primary, fallback)
-            return cls(fallback, cfg)
-        return cls(primary, cfg)
+        return cls(active_model_dir(cfg), cfg)
 
     def predict_frame(self, df: pd.DataFrame, capture_file: str | None = None,
                       source: str = "unknown") -> pd.DataFrame:
