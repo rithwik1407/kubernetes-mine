@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import Counter
 from typing import Any
 
-from live.config import load_config
+from live.config import load_config, repo_path
 from live.logging_setup import get_logger
 
 log = get_logger(__name__)
@@ -83,7 +84,7 @@ def check_ready(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
     except TrafficLabError as e:
         return {"ready": False, "reason": str(e)}
     try:
-        core.read_namespaced_config_map("traffic-generator-script", ns, _request_timeout=5)
+        cm = core.read_namespaced_config_map("traffic-generator-script", ns, _request_timeout=5)
     except client.exceptions.ApiException as e:
         if e.status == 404:
             return {"ready": False, "reason": f"traffic lab not deployed in namespace {ns}",
@@ -93,7 +94,26 @@ def check_ready(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         return {"ready": False, "reason": f"Kubernetes API error {e.status}: {_api_message(e)}"}
     except Exception as e:  # noqa: BLE001
         return {"ready": False, "reason": f"cluster unreachable: {str(e)[:160]}"}
-    return {"ready": True}
+    return {"ready": True, **generator_freshness(cm)}
+
+
+GENERATOR_FILE = repo_path("deploy/traffic-lab/traffic_generator.py")
+
+
+def generator_freshness(cm) -> dict[str, Any]:
+    """Is the generator script in the cluster the one in this checkout? An old copy keeps
+    running old behaviour (for example no deception redirect) until it is re-applied."""
+    try:
+        live = ((cm.data or {}).get("traffic_generator.py") or "").replace("\r\n", "\n")
+        local = GENERATOR_FILE.read_text().replace("\r\n", "\n")
+    except Exception:  # noqa: BLE001
+        return {}
+    if live.strip() == local.strip():
+        return {"generator_current": True}
+    return {"generator_current": False,
+            "warning": "the traffic generator script in the cluster is older than this checkout; "
+                       "runs use the old behaviour until you update it",
+            "fix": "kubectl apply -k deploy/traffic-lab"}
 
 
 # --- targets ---------------------------------------------------------------------------
@@ -250,6 +270,9 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         {"name": "PYTHONUNBUFFERED", "value": "1"},
         # finish (and log why) before Kubernetes kills the pod at activeDeadlineSeconds
         {"name": "TIME_BUDGET_S", "value": str(max(10, deadline - 30))},
+        # ... counted from the Job's creation, not from when the script started: a pod that
+        # waits for an image pull or a slow node would otherwise run past the deadline
+        {"name": "JOB_DEADLINE_EPOCH", "value": str(int(time.time()) + deadline - 25)},
         # the deception controller's redirect (live/redirect.py) arrives as a pod annotation
         {"name": "REDIRECT_FILE", "value": "/etc/podinfo/annotations"},
     ]

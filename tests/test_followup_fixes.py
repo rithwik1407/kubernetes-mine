@@ -467,3 +467,62 @@ def test_target_replying_to_a_lab_pod_is_never_engaged(cfg):
     with db.connect(cfg["paths"]["database"]) as c:
         out = ctl.engage(c, 1, [a])
     assert out[0]["actionable"] is False and out[0]["assessment"] == "reply"
+
+
+def test_engagement_replay_shows_target_first_then_decoy(cfg):
+    from datetime import timedelta
+    t0 = datetime.now(timezone.utc) - timedelta(minutes=2)
+    naive = lambda s: (t0 + timedelta(seconds=s)).replace(tzinfo=None).isoformat()
+    with db.connect(cfg["paths"]["database"]) as c:
+        for i in range(20):                      # 0-19 s: scan of the real target
+            db.insert_row(c, "detections", predicted_class="PortScan", confidence=0.97, is_malicious=1, source="live",
+                          detected_at=(t0 + timedelta(seconds=i + 2)).isoformat(), timestamp=naive(i),
+                          src_ip="10.42.0.50", dst_ip="10.42.0.7", src_port=40000 + i, dst_port=i + 1, model="m")
+        for i in range(20, 30):                  # 20-29 s: redirected to the decoy
+            db.insert_row(c, "detections", predicted_class="PortScan", confidence=0.95, is_malicious=1, source="live",
+                          detected_at=(t0 + timedelta(seconds=i + 2)).isoformat(), timestamp=naive(i),
+                          src_ip="10.42.0.50", dst_ip="10.42.0.90", src_port=40000 + i, dst_port=80, model="m")
+    eng = {"id": 1, "src_ip": "10.42.0.50", "attack_class": "PortScan", "state": "released",
+           "started_at": (t0 + timedelta(seconds=10)).isoformat(), "released_at": (t0 + timedelta(seconds=60)).isoformat(),
+           "decoy_pod_ips": ["10.42.0.90"], "decoy_rows": [], "target": {"ip": "10.42.0.7", "pod": "grafana-1"},
+           "attacker": {"pod": "atk", "namespace": "ids-traffic"},
+           "redirect": {"applied": True, "at": (t0 + timedelta(seconds=19)).isoformat(), "decoy": "decoy-web-portal-n1"}}
+    r = queries.engagement_replay(eng, cfg, frames=10, pods={})
+    assert r["to_target"] == 20 and r["to_decoy"] == 10
+    mid, last = r["frames"][4], r["frames"][-1]
+    assert {e["dst"] for e in mid["edges"]} == {"10.42.0.7"}            # before the redirect: target only
+    assert {e["dst"]: e["redirect"] for e in last["edges"]} == {"10.42.0.7": False, "10.42.0.90": True}
+    roles = {n["id"]: (n["role"], n["label"]) for n in r["nodes"]}
+    assert roles["10.42.0.50"] == ("attacker", "atk") and roles["10.42.0.90"] == ("decoy", "decoy-web-portal-n1 pod")
+    kinds = [e["kind"] for e in r["events"]]
+    assert kinds[:1] == ["engaged"] and "redirect" in kinds
+
+
+def test_window_policy_describes_every_rule_and_setting(cfg):
+    from live.window import policy_description
+    d = policy_description(cfg["capture"]["window"])
+    assert [r["id"] for r in d["rules"]] == ["R0_backlog", "R1_threat", "R2_high_rate", "R3_calm", "R4_hold"]
+    assert all(r.get("why") for r in d["rules"])
+    assert {s["key"] for s in d["settings"]} >= {"sizes", "threat_seconds", "high_rate_pps", "low_rate_pps",
+                                                 "calm_windows", "evidence_confidence", "default_seconds"}
+
+
+def test_job_stops_by_the_deadline_and_stale_generator_is_reported(cfg):
+    import time as _t
+    from live import trafficlab
+    job = trafficlab.build_job("port_scan", cfg, "10.42.0.7:1880")
+    env = {e["name"]: e["value"] for e in job["spec"]["template"]["spec"]["containers"][0]["env"]}
+    deadline = job["spec"]["activeDeadlineSeconds"]
+    assert abs(int(env["JOB_DEADLINE_EPOCH"]) - (_t.time() + deadline - 25)) < 5
+    cur = trafficlab.GENERATOR_FILE.read_text()
+    assert trafficlab.generator_freshness(NS(data={"traffic_generator.py": cur})) == {"generator_current": True}
+    old = trafficlab.generator_freshness(NS(data={"traffic_generator.py": "print('old')"}))
+    assert old["generator_current"] is False and old["fix"] == "kubectl apply -k deploy/traffic-lab"
+
+
+def test_deadline_failure_keeps_the_last_log_summary():
+    from live.pipeline import snapshot_diagnosis
+    snap = {"at": "2026-11-07T20:30:00+00:00", "verification": {"ok": 120, "errors": 0,
+            "actions": {"port_open": 20, "port_closed": 100, "port_filtered": 400, "redirected": 1}, "error_types": {}}}
+    text = snapshot_diagnosis(snap)
+    assert "120 answered" in text and "400 ports timed out" in text and "update the generator script" in text

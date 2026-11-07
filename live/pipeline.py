@@ -46,7 +46,11 @@ def preflight(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
         {"id": "targets", "label": f"Target apps running ({tg['running']}/{tg['total']})", "ok": tg["all_running"],
          "detail": ", ".join(f"{a['key']}: {a['state']}" for a in tg["apps"])},
         {"id": "lab", "label": "Traffic lab deployed", "ok": bool(lab.get("ready")),
-         "detail": lab.get("reason"), "fix": lab.get("fix")},
+         "detail": lab.get("reason"), "fix": None if lab.get("ready") else lab.get("fix")},
+        {"id": "generator", "label": "Generator script up to date in the cluster",
+         "ok": lab.get("generator_current") is not False,
+         "detail": lab.get("warning") or ("same as this checkout" if lab.get("generator_current") else "not checked"),
+         "fix": lab.get("fix") if lab.get("generator_current") is False else None},
         {"id": "capture", "label": "Capture available on this machine", "ok": sup["supported"], "detail": sup["reason"]},
         {"id": "cicflowmeter", "label": "CICFlowMeter ready", "ok": cfm["supported"], "detail": cfm["reason"]},
         {"id": "running", "label": "Capture running", "ok": bool(state.get("running")), "detail": state.get("status")},
@@ -112,6 +116,12 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
             notes.append(f"capture not started: {e}")
     elif capture_state.get("running"):
         notes.append("capture already running")
+    try:
+        lab = check_ready(cfg)
+        if lab.get("generator_current") is False:
+            notes.append(f"WARNING: {lab['warning']} (run: {lab['fix']})")
+    except Exception:  # noqa: BLE001
+        pass
     pairs = []
     for sc in dict.fromkeys(scenarios):
         if cfg["traffic_lab"]["scenarios"][sc]["mode"] == "decoy_probe" or not targets:
@@ -215,10 +225,32 @@ def _remember_pod_ips(run: dict[str, Any], cfg: dict[str, Any]) -> None:
         _update_run(run["id"], cfg, jobs=run["jobs"])
 
 
+def _snapshot_logs(run: dict[str, Any], states: dict[str, dict[str, Any]], cfg: dict[str, Any]) -> None:
+    """Keep a summary of each running generator's log in the run record. Kubernetes deletes
+    the pod when a Job hits activeDeadlineSeconds, and with it the log, so without this a
+    deadline failure could not say what the generator had done."""
+    changed = False
+    for j in run["jobs"]:
+        if (states.get(j["job"]) or {}).get("state") not in ("running", "pending"):
+            continue
+        try:
+            d = job_detail(j["job"], cfg, tail=5000)
+        except Exception:  # noqa: BLE001
+            continue
+        if not d.get("verification", {}).get("lines"):
+            continue
+        j["log_snapshot"] = {"at": _now(), "verification": d["verification"],
+                             "last_lines": (d.get("log_tail") or [])[-3:]}
+        changed = True
+    if changed:
+        _update_run(run["id"], cfg, jobs=run["jobs"])
+
+
 def _watch(run_id: str, cfg: dict[str, Any], poll_s: float = 3.0) -> None:
     """Wait for every Job of the run, drain the last window(s), then stop capture."""
     drain = float(cfg["traffic_lab"].get("auto_stop_drain_seconds", 15))
     max_window = max(cfg["capture"]["window"].get("sizes", [10]))
+    last_snap = 0.0
     try:
         while True:
             with db.connect(db.db_path(cfg)) as conn:
@@ -227,6 +259,9 @@ def _watch(run_id: str, cfg: dict[str, Any], poll_s: float = 3.0) -> None:
                 return
             _remember_pod_ips(run, cfg)
             states = _job_states(run, cfg)
+            if time.monotonic() - last_snap >= 10:
+                _snapshot_logs(run, states, cfg)
+                last_snap = time.monotonic()
             if states and all(s.get("state") in FINISHED for s in states.values()):
                 break
             time.sleep(poll_s)
@@ -343,6 +378,15 @@ def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> 
                 detail = {"verification": {"verified": False, "error": str(e)[:200]}, "failure": None, "pods": []}
             if not j.get("pod_ip"):
                 j["pod_ip"] = next((p["ip"] for p in detail.get("pods", []) if p.get("ip")), None)
+        snap = j.get("log_snapshot")
+        if snap and not ((detail or {}).get("verification") or {}).get("lines"):
+            # the pod (and its log) is gone: use the last summary taken while it ran
+            detail = {**(detail or {}), "verification": {**snap["verification"], "from_snapshot": snap["at"]}}
+            if (detail.get("failure") or {}).get("summary") or (lj and lj.get("failure")):
+                f = dict(detail.get("failure") or {"summary": lj["failure"]})
+                f["summary"] = f["summary"].replace("; no pod left to read (deleted with the Job's deadline)", "") \
+                    + ". " + snapshot_diagnosis(snap)
+                detail["failure"] = f
         per_job.append({**j, "state": state, "verification": (detail or {}).get("verification"),
                         "failure": (detail or {}).get("failure") or ({"summary": lj["failure"]} if lj and lj.get("failure") else None)})
     with db.connect(db.db_path(cfg)) as conn:
@@ -393,6 +437,23 @@ def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> 
             "by_class": {d["predicted_class"]: d["n"] for d in det}, "bursts": bursts, "decisions": decisions,
             "failed_windows": len(failed), "verification": job0.get("verification"),
             "auto_stop": run.get("auto_stop"), "hint": _hint(run, stages, svc)}
+
+
+def snapshot_diagnosis(snap: dict[str, Any]) -> str:
+    """One sentence on what the generator had done before its pod was deleted."""
+    v = snap.get("verification") or {}
+    acts = v.get("actions") or {}
+    text = f"Last log summary ({snap.get('at', '')[11:19]} UTC): {v.get('ok', 0):,} answered, {v.get('errors', 0):,} failed"
+    if acts.get("redirected"):
+        text += ", redirected to a decoy"
+    filt = acts.get("port_filtered", 0)
+    if filt and filt >= 0.3 * max(1, sum(n for a, n in acts.items() if a.startswith("port_"))):
+        text += (f"; {filt:,} ports timed out (filtered). Many timeouts after an engagement mean the pod was "
+                 "quarantined but its generator did not follow the redirect: update the generator script")
+    if v.get("error_types"):
+        top = max(v["error_types"].items(), key=lambda kv: kv[1])
+        text += f"; most common error: {top[0]} ({top[1]:,})"
+    return text
 
 
 def _has(conn, table: str) -> bool:

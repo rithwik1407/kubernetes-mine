@@ -99,6 +99,13 @@ nav .badge { margin-left: auto; font-size: 11px; background: var(--critical); co
 .field.check { justify-content: flex-end; padding-bottom: 22px; } .field.check span { display: flex; gap: 6px; align-items: center; color: var(--text-2); font-size: 12.5px; }
 .tip { display: inline-grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; border: 1px solid var(--border-2); color: var(--muted); font-size: 10px; cursor: help; margin-left: 2px; }
 .tip:focus-visible { outline: 2px solid var(--accent); }
+.rp-bar { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.rp-track { position: relative; flex: 1; height: 30px; }
+.rp-track::before { content: ""; position: absolute; left: 0; right: 0; top: 13px; height: 4px; border-radius: 2px; background: var(--surface-3); }
+.rp-fill { position: absolute; left: 0; top: 13px; height: 4px; border-radius: 2px; background: var(--accent); width: 0; transition: width .55s linear; }
+.rp-mark { position: absolute; top: 4px; width: 2px; height: 22px; margin-left: -1px; border-radius: 1px; }
+.rp-mark span { position: absolute; top: -2px; left: 5px; font-size: 10.5px; white-space: nowrap; color: var(--text-2); }
+.rp-track input[type=range] { position: absolute; inset: 0; width: 100%; opacity: 0; cursor: pointer; margin: 0; }
 .seg { display: inline-flex; border: 1px solid var(--border-2); border-radius: 8px; overflow: hidden; }
 .seg button { background: var(--surface-2); color: var(--text-2); border: 0; padding: 5px 11px; font-size: 12px; cursor: pointer; }
 .seg button + button { border-left: 1px solid var(--border-2); }
@@ -259,7 +266,6 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
         <div class="seg" role="group" aria-label="Time range"><button data-range="5">5 min</button><button data-range="15" class="on">15 min</button><button data-range="30">30 min</button></div></div><div id="ovActivity" class="chart"></div></div>
       <div class="card"><div class="card-head"><div><h2>Recent security events</h2><p class="hint">Malicious detections, flow bursts / port sweeps and decoy actions</p></div></div><ul class="feed" id="ovEvents"><li class="loading">Loading…</li></ul></div>
     </div>
-    <div class="card" style="margin-top:14px"><h2>Traffic flow</h2><p class="hint" id="ovFlowHint">Attacker / client → target → decoy for the selected time range. Line width = flows, colour = severity; malicious paths glow.</p><div id="ovFlow" class="flowdia"></div></div>
     <div class="grid two" style="margin-top:14px">
       <div class="card"><h2>Traffic distribution</h2><p class="hint">Benign vs malicious flows scored by the live model</p><div id="ovDist" class="chart"></div></div>
       <div class="card"><h2>Attack classification</h2><p class="hint">Malicious flows by predicted class</p><div id="ovClasses" class="chart"></div></div>
@@ -308,11 +314,11 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <!-- D. WINDOW -->
   <section class="page" id="p-window" data-title="Adaptive observation window" data-sub="Chosen by the capture service after every window from measured packet rate and threat evidence">
     <div class="grid kpis" id="winKpis"></div>
-    <div class="card" style="margin-top:14px"><h2>Traffic flow</h2><p class="hint" id="winFlowHint">Who talked to whom in the recent windows</p><div id="winFlow" class="flowdia"></div></div>
-    <div class="grid two" style="margin-top:14px">
-      <div class="card"><h2>Window size over time</h2><p class="hint">Each point is one capture window; marker colour shows the rule that chose the next size</p><div id="winChart" class="chart"></div></div>
-      <div class="card"><h2>Policy</h2><p class="hint">First matching rule wins (config/live.yaml → capture.window)</p><div id="winPolicy"></div></div>
-    </div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Window size over time</h2><p class="hint" id="winChartHint">The window length the capture service chose after each window. Dots mark a change, coloured by the rule that made it; red bands are periods with threat evidence.</p></div>
+      <div class="seg" role="group" aria-label="Time span" id="winSpan"><button data-span="15">15 min</button><button data-span="60" class="on">1 h</button><button data-span="360">6 h</button></div></div>
+      <div id="winChart" class="chart"></div></div>
+    <div class="card" style="margin-top:14px"><h2>Policy</h2><p class="hint">After every window the rules below are checked in order and the first that matches picks the next size. Values come from config/live.yaml → capture.window.</p>
+      <div id="winPolicy"></div><div id="winSettings" style="margin-top:14px"></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Transition history</h2><p class="hint">Every decision with its evidence</p></div>
       <label class="filter"><input type="checkbox" id="winChanged" checked> changes only</label></div><div id="winTable"></div></div>
   </section>
@@ -364,10 +370,10 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
       <div id="decFlow" class="flowdia" style="margin-bottom:12px"></div>
       <div id="decLive"><div class="loading">Loading…</div></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detected but not engaged</h2><p class="hint">Sources the model or the behaviour rules flagged in the last 15 minutes that have no decoy, with the controller's reason (severity or flow threshold not met, cooldown, decoy limit, control-plane or decoy traffic).</p></div></div><div id="decNot"></div></div>
-    <div class="grid two" style="margin-top:14px">
-      <div class="card"><h2>Decoy pods</h2><p class="hint">Live from Kubernetes (namespace ids-deception)</p><div id="decPods"></div></div>
-      <div class="card"><h2>Check it yourself</h2><p class="hint">Run these on the machine with your kubeconfig</p><div id="decCmds"></div></div>
-    </div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Decoy pods</h2><p class="hint">Live from Kubernetes (namespace ids-deception)</p></div>
+      <button class="btn small" id="decCmdsBtn" aria-expanded="false" aria-controls="decCmdsWrap">Check it yourself</button></div>
+      <div id="decCmdsWrap" hidden style="margin-bottom:12px;padding:10px 12px;border:1px solid var(--border-2);border-radius:10px"><p class="hint" style="margin-top:0">Run these on the machine with your kubeconfig. Names are filled in from the current engagement.</p><div id="decCmds"></div></div>
+      <div id="decPods"></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detection thresholds</h2><p class="hint">When ML detections trigger a decoy + redirect: per attack class, at least <b>N flows</b> from one source, each ≥ <b>min confidence</b>, within <b>T seconds</b>, with <b>mean confidence</b> ≥ X. A single flow never triggers. Control-plane traffic (API server, kubelet, kube-system) is never acted on.</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary small" id="polSave">Save thresholds</button><button class="btn small" id="polReset">Reset to defaults</button></div></div>
       <div class="form" style="margin-bottom:10px;align-items:end"><label class="field">Engage deception at
@@ -437,6 +443,13 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
 </div>
 <div id="toasts" role="status" aria-live="polite"></div>
 <dialog id="confirmDlg"><h3 id="cfTitle">Are you sure?</h3><p id="cfText"></p><div class="actions"><button class="btn" value="cancel" id="cfNo">Cancel</button><button class="btn danger" id="cfYes">Confirm</button></div></dialog>
+<dialog id="replayDlg" style="width:min(1000px,95vw);max-width:95vw" aria-labelledby="rpTitle"><div class="card-head" style="margin-bottom:6px"><div><h3 id="rpTitle" style="margin:0">Engagement flow</h3><p class="hint" id="rpSub" style="margin:2px 0 0"></p></div><button class="btn small" id="rpClose">Close</button></div>
+  <div id="rpFlow" class="flowdia"></div>
+  <div class="rp-bar"><button class="btn small" id="rpPlay" aria-label="Pause replay">Pause</button>
+    <div class="rp-track" id="rpTrack"><div class="rp-fill" id="rpFill"></div><div id="rpMarks"></div><input type="range" id="rpSlider" min="0" max="1" value="0" aria-label="Replay position"></div>
+    <span class="mono hint" id="rpTime" style="min-width:64px;text-align:right">0 s</span></div>
+  <div class="grid kpis" id="rpKpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr));margin-top:10px"></div>
+</dialog>
 <dialog id="jobDialog"><h3 id="jdTitle">Job</h3><div id="jdBody"></div><div class="actions" style="margin-top:12px"><button class="btn" id="jdClose">Close</button></div></dialog>
 
 <script>
@@ -581,7 +594,7 @@ function flowDiagram(id, g, opts = {}) {
   if (!svg || host.dataset.fd !== "1") {
     host.dataset.fd = "1";
     host.innerHTML = `<svg role="img" aria-label="${esc(opts.label || "Traffic flow diagram")}"><defs>
-      <filter id="${id}-glow" x="-20%" y="-50%" width="140%" height="200%"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
+      <filter id="${id}-glow" filterUnits="userSpaceOnUse" x="-40" y="-40" width="6000" height="4000"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
       </defs><g class="cols"></g><g class="edges"></g><g class="parts"></g><g class="nodes"></g></svg>
       <div class="fd-legend"><span><i style="background:${cssVar("--critical")}"></i>high severity</span><span><i style="background:${cssVar("--serious")}"></i>medium</span><span><i style="background:${cssVar("--warning")}"></i>low</span><span><i style="background:${cssVar("--c-benign")}"></i>benign</span><span><i style="background:repeating-linear-gradient(90deg,${cssVar("--accent")} 0 5px,transparent 5px 9px)"></i>redirected to decoy</span><span class="fd-trunc"></span></div>`;
     svg = host.querySelector("svg");
@@ -756,7 +769,6 @@ async function pageOverview(full) {
     kpi("Node CPU", node ? u(fmt(node.cpu_cores, 2), "cores") : NA, node ? `memory ${fmt(node.memory_mb)} MiB (metrics-server)` : esc(((r.cluster || {}).error || "metrics-server unavailable").slice(0, 60))),
   ].join("");
   drawActivity(act);
-  api(`/api/live/flow-graph?seconds=${Math.min(3600, (S.ovRange || 15) * 60)}`).then(g => flowDiagram("ovFlow", g, { emptyBody: "Start capture or run a Traffic-lab scenario." })).catch(() => { });
   // events
   $("ovEvents").html = ev.length ? ev.map(e => `<li><span class="when">${time(e.ts)}</span><span class="what">${e.kind === "detection" ? clsTag(e.title) : `<b>${esc(e.title)}</b>`}
     <span style="color:var(--muted)">${esc(e.src_ip || "")}${e.dst_ip ? " → " + esc(e.dst_ip) : ""}${e.dst_port ? ":" + esc(e.dst_port) : ""}${e.n ? " · " + fmt(e.n) + (e.kind === "detection" ? " flow(s)" : e.kind === "deception" ? " evidence" : " flows") : ""}${e.confidence ? " · conf " + fmt(e.confidence, 2) : ""}</span>${e.kind === "deception" && e.reason ? `<span class="hint" style="display:block;margin:2px 0 0;white-space:normal">${esc(e.trigger || "")} → ${esc(e.action)} (${esc(e.capture_file || "")}): ${esc(e.reason.slice(0, 220))}${e.evidence_flows && e.evidence_flows.length ? ` · evidence flows #${e.evidence_flows.slice(0, 5).join(", #")}` : ""}</span>` : ""}</span></li>`).join("")
@@ -873,32 +885,54 @@ async function runEval(btn) {
 /* ---------------- D. Window ---------------- */
 async function pageWindow() {
   const changed = $("winChanged").checked;
-  const [ws, all] = await Promise.all([api("/api/window/status"), api("/api/window/history?limit=300")]);
+  const [ws, all] = await Promise.all([api("/api/window/status"), api(`/api/window/history?limit=${(S.winSpan || 60) >= 360 ? 5000 : 1500}`)]);
   const p = ws.policy, ld = ws.last_decision, ev = ld ? ld.evidence || {} : {};
   $("winKpis").html = [
     kpi("Current window", ws.running ? fmt(ws.current_window_s) + " s" : NA, ws.running ? "capture running" : "capture not running", ws.running ? "ok" : "idle"),
-    kpi("Available sizes", p.sizes.map(s => s + " s").join(" · "), `min ${p.min_seconds} s · max ${p.max_seconds} s`),
+    kpi("Available sizes", p.sizes.join(" · ") + " s", `min ${p.min_seconds} s · max ${p.max_seconds} s`),
     kpi("Last rule", ld ? esc(ld.rule) : NA, ld ? esc(ld.reason.slice(0, 80)) : ""),
     kpi("Traffic volume", ev.pps === null || ev.pps === undefined ? NA : fmt(ev.pps, 1) + " pkt/s", ev.packets != null ? `${fmt(ev.packets)} packets in ${fmt(ev.duration_s, 1)} s` : ""),
     kpi("Threat evidence", ld ? (ev.threat ? `<span style="color:var(--critical-ink)">yes</span>` : "none") : NA, ld ? `${fmt(ev.malicious_flows)} malicious flows · ${fmt(ev.bursts)} alerts · calm streak ${fmt(ev.calm_streak)}` : "", ld ? (ev.threat ? "error" : "ok") : null),
   ].join("");
-  $("winPolicy").html = table([{ h: "Rule", f: r => `<b>${esc(r.id)}</b>` }, { h: "When", wrap: 1, k: "when" }, { h: "Then", f: r => `<span style="white-space:normal;display:inline-block;min-width:140px">${esc(r.then)}</span>` }], p.rules) +
-    `<p class="hint" style="margin-top:8px">Initial window ${p.initial_seconds} s. Threat evidence uses ML confidence ≥ ${p.evidence_confidence}. Shorter windows cut TCP flows into more pieces (CICFlowMeter converts each window separately), so threats shrink to ${p.threat_seconds} s rather than the minimum.</p>`;
-  const pts = all.filter(r => r.rule !== "start").reverse();
+  const RULE_NAME = { R0_backlog: "Backlog", R1_threat: "Threat", R2_high_rate: "High rate", R3_calm: "Calm", R4_hold: "Hold" };
   const ruleColor = { R0_backlog: cssVar("--accent"), R1_threat: cssVar("--critical"), R2_high_rate: cssVar("--warning"), R3_calm: cssVar("--good"), R4_hold: cssVar("--muted") };
-  // one clean step line; a marker only where the size actually changed, coloured by the rule
+  const lastRule = ld ? ld.rule : null;
+  $("winPolicy").html = `<h3 style="font-size:13px;margin:0 0 6px">Rules (first match wins)</h3>` + table([
+    { h: "Rule", f: r => `<span style="display:inline-flex;align-items:center;gap:6px;white-space:nowrap"><span aria-hidden="true" style="width:9px;height:9px;border-radius:50%;background:${ruleColor[r.id] || cssVar("--muted")}"></span><b>${esc(RULE_NAME[r.id] || r.id)}</b></span><br><span class="na mono">${esc(r.id)}</span>${r.id === lastRule ? `<br>${pill("last used", "ok")}` : ""}` },
+    { h: "When", wrap: 1, k: "when" }, { h: "Then", wrap: 1, k: "then" }, { h: "Why", wrap: 1, f: r => `<span class="hint">${esc(r.why || "")}</span>` }], p.rules);
+  $("winSettings").html = `<h3 style="font-size:13px;margin:0 0 6px">Settings</h3>` + table([
+    { h: "Setting", f: r => `<span class="mono">${esc(r.key)}</span>` }, { h: "Value", f: r => `<b>${esc(r.value)}</b>` }, { h: "What it does", wrap: 1, k: "meaning" }], p.settings || []);
+  // one segment per continuous capture; a gap (capture stopped) breaks the line instead of a long flat step
+  const span = +(S.winSpan || 60), cut = Date.now() - span * 60e3;
+  const pts = all.filter(r => r.rule !== "start" && new Date(r.created_at).getTime() >= cut).reverse();
+  const gapMs = Math.max(...p.sizes) * 4000 + 15000;
+  const xs = [], ys = [], txt = [];
+  pts.forEach((r, i) => {
+    const t = new Date(r.created_at);
+    if (i && t - new Date(pts[i - 1].created_at) > gapMs) { xs.push(new Date(t - 1)); ys.push(null); txt.push(""); }
+    xs.push(t); ys.push(r.next_s); txt.push(`${RULE_NAME[r.rule] || r.rule}: ${r.reason.slice(0, 90)}`);
+  });
   const chg = pts.filter((r, i) => i === 0 || r.next_s !== pts[i - 1].next_s);
-  const rulesSeen = [...new Set(chg.map(r => r.rule))];
+  const rulesSeen = Object.keys(RULE_NAME).filter(k => chg.some(r => r.rule === k));
+  // red bands while the threat rule was in force
+  const bands = []; let open = null;
+  pts.forEach((r, i) => {
+    if (r.rule === "R1_threat" && !open) open = r.created_at;
+    const nxt = pts[i + 1];
+    if (open && (r.rule !== "R1_threat" || !nxt || new Date(nxt.created_at) - new Date(r.created_at) > gapMs)) { bands.push([open, r.rule === "R1_threat" ? r.created_at : r.created_at]); open = null; }
+  });
+  const crit = cssVar("--critical");
   plot("winChart", pts.length ? [
-    { type: "scatter", mode: "lines", line: { shape: "hv", width: 2.2, color: cssVar("--accent") }, fill: "tozeroy", fillcolor: "rgba(57,135,229,.10)",
-      x: pts.map(r => new Date(r.created_at)), y: pts.map(r => r.next_s), hovertemplate: "%{x|%H:%M:%S} · window %{y} s<extra></extra>", showlegend: false },
-    ...rulesSeen.map(rule => { const rs = chg.filter(r => r.rule === rule); return { type: "scatter", mode: "markers", name: rule.replace("_", " "),
-      x: rs.map(r => new Date(r.created_at)), y: rs.map(r => r.next_s), marker: { size: 9, color: ruleColor[rule] || cssVar("--muted"), line: { color: cssVar("--surface"), width: 2 } },
-      customdata: rs.map(r => [r.previous_s ?? "—", r.reason.slice(0, 90)]), hovertemplate: "%{x|%H:%M:%S}: %{customdata[0]} → %{y} s<br>" + rule + ": %{customdata[1]}<extra></extra>" }; }),
-  ] : null, { showlegend: rulesSeen.length > 0, legend: { orientation: "h", y: -0.22, x: 0, font: { size: 11, color: cssVar("--text-2") } }, margin: { l: 48, r: 12, t: 8, b: 56 },
-    yaxis: Object.assign(layout().yaxis, { title: { text: "window (s)", font: { size: 11 } }, tickvals: p.sizes, range: [0, Math.max(...p.sizes) * 1.15] }) }, "No windows captured yet");
-  const flowS = Math.min(300, Math.max(30, (ws.current_window_s || 10) * 6));
-  api(`/api/live/flow-graph?seconds=${flowS}`).then(g => { $("winFlowHint").textContent = `Who talked to whom in the last ${flowS} s (about six observation windows). Line width = flows, colour = severity of the model's verdict; dashed = redirected to a decoy.`; flowDiagram("winFlow", g, { emptyBody: ws.running ? "No scored flows in this period yet." : "Capture is not running." }); }).catch(() => { });
+    { type: "scatter", mode: "lines", line: { shape: "hv", width: 2.4, color: cssVar("--accent") }, fill: "tozeroy", fillcolor: "rgba(57,135,229,.10)", connectgaps: false,
+      x: xs, y: ys, text: txt, hovertemplate: "%{x|%H:%M:%S} · next window %{y} s<br>%{text}<extra></extra>", showlegend: false },
+    ...rulesSeen.map(rule => { const rs = chg.filter(r => r.rule === rule); return { type: "scatter", mode: "markers", name: RULE_NAME[rule],
+      x: rs.map(r => new Date(r.created_at)), y: rs.map(r => r.next_s), marker: { size: 10, color: ruleColor[rule] || cssVar("--muted"), line: { color: cssVar("--surface"), width: 2 } },
+      customdata: rs.map(r => [r.previous_s ?? "—", r.reason.slice(0, 90)]), hovertemplate: "%{x|%H:%M:%S}: %{customdata[0]} s → %{y} s<br>" + RULE_NAME[rule] + ": %{customdata[1]}<extra></extra>" }; }),
+  ] : null, { showlegend: rulesSeen.length > 0, legend: { orientation: "h", y: 1.12, x: 0, font: { size: 11, color: cssVar("--text-2") } }, margin: { l: 52, r: 16, t: 28, b: 36 },
+    shapes: bands.map(([a, b]) => ({ type: "rect", xref: "x", yref: "paper", x0: a, x1: a === b ? new Date(new Date(b).getTime() + 3000) : b, y0: 0, y1: 1, fillcolor: crit, opacity: 0.08, line: { width: 0 }, layer: "below" })),
+    xaxis: Object.assign(layout().xaxis, { range: [new Date(Math.max(cut, pts.length ? new Date(pts[0].created_at).getTime() - 5000 : cut)), new Date()] }),
+    yaxis: Object.assign(layout().yaxis, { title: { text: "window (s)", font: { size: 11 } }, tickvals: p.sizes, ticktext: p.sizes.map(x => x + " s"), range: [0, Math.max(...p.sizes) * 1.18] }) },
+    `No capture windows in the last ${span >= 60 ? span / 60 + " h" : span + " min"}`);
   const rows = changed ? all.filter(r => r.changed) : all;
   $("winTable").html = table([
     { h: "Time", f: r => time(r.created_at) }, { h: "Change", f: r => `${r.previous_s ?? "—"} → <b>${r.next_s}</b> s` }, { h: "Rule", f: r => esc(r.rule) },
@@ -1004,7 +1038,8 @@ async function pageLab(full) {
     $("runSteps").html = run.stages.map(s => `<div class="step ${s.state}"><div class="t"><span class="dot ${stateCls(s.state)}"></span>${esc(s.label)}</div><div class="d">${esc(s.detail)}</div></div>`).join("");
     const bc = Object.entries(run.by_class || {});
     const fails = (run.jobs || []).filter(j => j.failure);
-    $("runClasses").html = fails.map(j => errBox(`${j.job} (${j.scenario} → ${j.target_label || j.target}) failed: ${j.failure.summary}`)).join("") +
+    const warns = (run.run.notes || []).filter(n => n.startsWith("WARNING"));
+    $("runClasses").html = warns.map(w => `<div class="errbox" style="border-color:var(--warning);color:var(--warning-ink, var(--warning))">${esc(w)}</div>`).join("") + fails.map(j => errBox(`${j.job} (${j.scenario} → ${j.target_label || j.target}) failed: ${j.failure.summary}`)).join("") +
       ((run.run.launch_errors || []).map(e => errBox(`${e.scenario} → ${e.target || "default"} not launched: ${e.error}`)).join("")) +
       (run.jobs && run.jobs.length ? `<h3 style="font-size:13px;margin:8px 0 6px">Expected vs predicted, per Job</h3>` + table([
         { h: "Job", f: j => `<span class="mono">${esc(j.job)}</span>` }, { h: "Attack → target", f: j => `${esc(j.scenario)} → ${esc(j.target_label || j.target)}` },
@@ -1059,6 +1094,7 @@ function renderPolicy(st) {
     { h: "Since", f: e => ago(e.started_at) }, { h: "Last evidence", f: e => ago(e.last_evidence_at) },
     { h: "Redirect", wrap: 1, f: e => (e.redirect || {}).applied ? pill("quarantined to decoys", "ok") + ` <span class="mono">${esc(e.redirect.namespace)}/${esc(e.redirect.pod)}</span>` : `<span class="hint">${esc((e.redirect || {}).reason || "—")}</span>` },
     { h: "Decoys", f: e => esc((e.decoys || []).join(", ") || "—") },
+    { h: "Flow", f: e => `<button class="btn small" data-replay="${esc(e.id)}">View flow</button>` },
   ], eng, { emptyTitle: "No engaged sources", emptyBody: "A source is engaged when its evidence meets the thresholds above." });
 }
 function policyBody() {
@@ -1082,9 +1118,9 @@ function renderLive(lv) {
     const dp = pods.find(p => p.decoy === rd.decoy) || pods[0];
     const decoyCell = dp ? `<span class="mono">${esc(dp.namespace)}/${esc(dp.pod)}</span><br><span class="mono">${esc(dp.ip || "no IP yet")}</span> ${pill(dp.ready ? "Running" : dp.phase || "Pending", dp.ready ? "ok" : "pending")}<br>${nodeTag(dp.node)}`
       : (e.decoy_rows.length ? `<span class="mono">${esc(e.decoy_rows.map(d => d.name).join(", "))}</span><br>${pill(e.state === "active" ? "no pod yet" : "removed", e.state === "active" ? "pending" : "idle")}` : `<span class="na">no decoy yet</span>`);
-    const redirected = rd.applied ? pill("redirected", "ok") : rd.pending ? pill("waiting for Ready decoy", "pending") : pill("not redirected", "idle");
+    const redirected = rd.applied ? pill("redirected", "ok") : rd.pending ? pill(rd.phase === "annotated" ? "redirect sent, waiting for the generator" : "waiting for Ready decoy", "pending") : pill("not redirected", "idle");
     return `<div class="card" style="margin:0 0 10px;background:var(--surface-2)">
-      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><b>#${e.id}</b> ${CLASS_COLORS[e.attack_class] ? clsTag(e.attack_class) : esc(e.attack_class)} ${pill(e.state, e.state === "active" ? "ok" : "idle")} ${redirected} ${nodeTag(e.node)} <span class="na">since ${time(e.started_at)}${e.released_at ? " · released " + time(e.released_at) : ""}</span></div>
+      <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px"><b>#${e.id}</b> <button class="btn small" data-replay="${esc(e.id)}" title="Replay this engagement's traffic: attacker → target, then → decoy">View flow</button> ${CLASS_COLORS[e.attack_class] ? clsTag(e.attack_class) : esc(e.attack_class)} ${pill(e.state, e.state === "active" ? "ok" : "idle")} ${redirected} ${nodeTag(e.node)} <span class="na">since ${time(e.started_at)}${e.released_at ? " · released " + time(e.released_at) : ""}</span></div>
       <div class="grid" style="grid-template-columns:1fr auto 1fr auto 1fr;gap:8px;align-items:center">
         <div><div class="label hint">Attacker</div>${podRef(a, e.src_ip)}<br>${nodeTag(a.node)}</div><div aria-hidden="true">→</div>
         <div><div class="label hint">Target${svc ? " · service " + esc(svc) : ""}</div>${podRef(t)}<br>${nodeTag(t.node)}</div><div aria-hidden="true">→</div>
@@ -1110,13 +1146,64 @@ function renderLive(lv) {
     ["Decoy Services and their endpoints (pod IPs behind the Service)", "kubectl get svc,endpoints -n ids-deception -l app.kubernetes.io/managed-by=ids-deception-controller"],
     ["Which node the decoy was pinned to", `kubectl get deploy ${dn} -n ids-deception -o jsonpath='{.spec.template.spec.nodeSelector}'`],
     ["Requests the decoy received (one JSON line per request, with src_ip)", `kubectl logs -n ids-deception -l ids/decoy=${dn} --tail=20`],
-    ["Attacker pod: quarantine label and redirect annotations", `kubectl get pod ${ap} -o jsonpath='{.metadata.labels}{"\n"}{.metadata.annotations}{"\n"}'`],
+    ["Attacker pod: quarantine label and redirect annotations", `kubectl get pod ${ap} -o jsonpath='{.metadata.labels}{"\\n"}{.metadata.annotations}{"\\n"}'`],
     ["Attacker side: the generator logs the redirect", `kubectl logs ${ap} | grep redirected`],
     ["Quarantine NetworkPolicy (egress only to decoys + DNS)", "kubectl get networkpolicy -n ids-traffic traffic-lab-quarantine -o yaml"],
   ];
   $("decCmds").html = cmds.map(([h, c]) => `<div style="margin-bottom:8px"><div class="hint">${esc(h)}</div><code class="mono" style="display:block;white-space:pre-wrap;word-break:break-all;background:var(--surface-2);padding:6px 8px;border-radius:6px">${esc(c)}</code></div>`).join("") +
     `<p class="hint">How the redirect works: the controller labels the attacker pod <span class="mono">ids-deception/quarantine=true</span> (a NetworkPolicy then lets it reach only the decoys and DNS) and annotates it with <span class="mono">ids-deception/redirect-to</span> and <span class="mono">ids-deception/redirect-only</span>. The lab generator reads its own annotations and sends new connections aimed at the attacked pod to the decoy. It is not an iptables DNAT on the node (that needs root on the node).</p>`;
 }
+/* ---------------- E. Deception: replay of one engagement ---------------- */
+const EVENT_COLOR = { engaged: "--serious", decoy_ready: "--good", redirect: "--accent", released: "--muted" };
+const RP = { timer: null, data: null, i: 0 };
+function rpStop() { clearInterval(RP.timer); RP.timer = null; $("rpPlay").textContent = "Play"; $("rpPlay").setAttribute("aria-label", "Play replay"); }
+function rpShow(i) {
+  const d = RP.data; if (!d) return;
+  RP.i = Math.max(0, Math.min(i, d.frames.length - 1));
+  const f = d.frames[RP.i], used = new Set([d.src_ip, ...f.edges.map(e => e.dst)]);
+  const sevOf = id => f.edges.filter(e => e.src === id || e.dst === id).reduce((a, e) => SEV_RANK[e.severity] > SEV_RANK[a] ? e.severity : a, "benign");
+  const g = { nodes: d.nodes.filter(n => used.has(n.id)).map(n => ({ ...n, severity: sevOf(n.id) })), edges: f.edges, truncated: 0 };
+  flowDiagram("rpFlow", g, { label: `Replay of engagement ${d.id}`, emptyTitle: "No flows yet at this point", emptyBody: "Press Play or drag the timeline." });
+  $("rpSlider").value = RP.i;
+  $("rpFill").style.width = (100 * f.offset_s / d.span_s).toFixed(1) + "%";
+  $("rpTime").textContent = `${fmt(f.offset_s, 1)} s`;
+  const toT = f.edges.filter(e => !e.redirect).reduce((a, e) => a + e.flows, 0), toD = f.edges.filter(e => e.redirect).reduce((a, e) => a + e.flows, 0);
+  const passed = d.events.filter(e => e.offset_s <= f.offset_s).map(e => e.label);
+  $("rpKpis").html = kpi("Flows to real target", fmt(toT), "so far") + kpi("Flows to decoy", fmt(toD), "so far", toD ? "ok" : null) +
+    kpi("Malicious flows", fmt(f.edges.reduce((a, e) => a + e.malicious, 0)), "so far") + kpi("Stage", esc(passed.length ? passed[passed.length - 1] : "attack starts"), `${fmt(f.offset_s, 1)} s of ${fmt(d.span_s, 1)} s`);
+}
+function rpPlay() {
+  if (RP.timer) { rpStop(); return; }
+  if (RP.i >= RP.data.frames.length - 1) RP.i = -1;
+  $("rpPlay").textContent = "Pause"; $("rpPlay").setAttribute("aria-label", "Pause replay");
+  RP.timer = setInterval(() => { if (RP.i >= RP.data.frames.length - 1) { rpStop(); return; } rpShow(RP.i + 1); }, 650);
+}
+async function openReplay(id) {
+  rpStop(); RP.data = null;
+  $("rpTitle").textContent = `Engagement #${id}: traffic flow`; $("rpSub").textContent = "Loading…";
+  $("rpFlow").innerHTML = `<div class="loading">Loading…</div>`; $("rpFlow").dataset.fd = ""; $("rpMarks").innerHTML = ""; $("rpKpis").innerHTML = "";
+  $("replayDlg").showModal();
+  let d;
+  try { d = await api(`/api/deception/engagements/${encodeURIComponent(id)}/replay?frames=30`); }
+  catch (e) { $("rpSub").textContent = ""; $("rpFlow").innerHTML = errBox(e.message); return; }
+  RP.data = d;
+  const att = d.nodes.find(n => n.role === "attacker") || {};
+  $("rpSub").textContent = `${att.label || d.src_ip} · ${d.attack_class || "attack"} · ${fmt(d.flows)} flows over ${fmt(d.span_s, 1)} s (${fmt(d.to_target)} to the target, ${fmt(d.to_decoy)} to the decoy)`;
+  $("rpSlider").max = d.frames.length - 1;
+  $("rpMarks").html = d.events.filter(e => e.offset_s <= d.span_s).map((e, k) => `<div class="rp-mark" style="left:${(100 * e.offset_s / d.span_s).toFixed(1)}%;background:${cssVar(EVENT_COLOR[e.kind] || "--muted")}" title="${esc(e.label)} at ${fmt(e.offset_s, 1)} s"><span style="top:${k % 2 ? 14 : -2}px">${esc(e.label)}</span></div>`).join("");
+  if (!d.frames.length || !d.flows) { $("rpFlow").innerHTML = empty("No captured flows for this engagement", "Capture was not running while it was active, or its flows have been deleted."); return; }
+  RP.i = 0; rpShow(0); rpPlay();
+}
+$("decCmdsBtn").addEventListener("click", () => {
+  const w = $("decCmdsWrap"), open = w.hidden; w.hidden = !open;
+  $("decCmdsBtn").setAttribute("aria-expanded", String(open)); $("decCmdsBtn").textContent = open ? "Hide commands" : "Check it yourself";
+});
+$("rpClose").addEventListener("click", () => { rpStop(); $("replayDlg").close(); });
+$("replayDlg").addEventListener("close", rpStop);
+$("rpPlay").addEventListener("click", rpPlay);
+$("rpSlider").addEventListener("input", e => { rpStop(); rpShow(+e.target.value); });
+document.addEventListener("click", e => { const b = e.target.closest("[data-replay]"); if (b) openReplay(b.dataset.replay); });
+
 async function pageDeception() {
   const [st, pol, decoys, dec, inter, lv] = await Promise.all([api("/api/deception/status"), S.policy ? Promise.resolve(S.policy) : api("/api/deception/policy"),
     api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200"), api("/api/deception/live?limit=20")]);
@@ -1326,6 +1413,10 @@ $("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", {
   r => `${r.jobs.length} Job(s) created${r.launch_errors.length ? `, ${r.launch_errors.length} refused` : ""}. ${r.notes.join("; ")}. Waiting for the generator logs to confirm traffic…`);
 $("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: false, auto_stop: false }) }),
   r => `${r.jobs.length} Job(s) created (capture not started)`);
+document.querySelectorAll("#winSpan [data-span]").forEach(b => b.addEventListener("click", () => {
+  S.winSpan = +b.dataset.span; document.querySelectorAll("#winSpan [data-span]").forEach(x => x.classList.toggle("on", x === b));
+  refresh(true);
+}));
 document.querySelectorAll("[data-range]").forEach(b => b.addEventListener("click", () => {
   S.ovRange = +b.dataset.range; document.querySelectorAll("[data-range]").forEach(x => x.classList.toggle("on", x === b));
   try { localStorage.setItem("ids.ovRange", String(S.ovRange)); } catch (_) { }

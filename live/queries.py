@@ -497,3 +497,102 @@ def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | No
                       "scenario": (p.get("labels") or {}).get("scenario") if p else None})
     return {"seconds": int(seconds), "since": since, "nodes": nodes, "edges": chosen,
             "truncated": max(0, len(edges) - len(chosen))}
+
+
+def engagement_replay(eng: dict[str, Any], cfg=None, frames: int = 24, pods: dict | None = None) -> dict[str, Any]:
+    """The whole traffic of one engaged attacker, in time steps, for the replay on the
+    Deception page: attacker -> target before the redirect, attacker -> decoy after it.
+
+    `eng` is one row of controller.engagement_details(). Flows are placed by their own
+    start time (CICFlowMeter timestamp, UTC); the engagement, decoy-ready, redirect and
+    release moments come from the controller. Each frame holds the cumulative edges up to
+    its time, so the diagram grows as the attack did."""
+    cfg = cfg or load_config()
+    th = cfg["deception"].get("thresholds", {})
+    src = eng["src_ip"]
+    decoy_ips = set(eng.get("decoy_pod_ips") or [])
+    t_eng = datetime.fromisoformat(eng["started_at"]).astimezone(timezone.utc).replace(tzinfo=None)
+    t_end = (datetime.fromisoformat(eng["released_at"]).astimezone(timezone.utc).replace(tzinfo=None)
+             if eng.get("released_at") else datetime.utcnow())
+    lo = (t_eng - timedelta(seconds=600)).isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        rows = [dict(r) for r in c.execute(
+            "SELECT timestamp ts, src_ip, dst_ip, packets, is_malicious mal, confidence conf, predicted_class cls "
+            "FROM detections WHERE (src_ip = ? OR dst_ip = ?) AND timestamp >= ? AND timestamp <= ? AND simulated = 0 "
+            "AND allowlisted IS NULL "
+            "AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 ORDER BY timestamp",
+            (src, src, lo, t_end.isoformat()))]
+    # the attack itself: from the first malicious flow of this source in the 10 minutes before
+    # the engagement (or 60 s before it), to its last flow
+    first_mal = next((r["ts"] for r in rows if r["mal"]), None)
+    start = min(datetime.fromisoformat(first_mal) if first_mal else t_eng, t_eng) - timedelta(seconds=5)
+    start = max(start, t_eng - timedelta(seconds=600))
+    rows = [r for r in rows if r["ts"] >= start.isoformat()]
+    end = max([datetime.fromisoformat(rows[-1]["ts"]) if rows else t_eng, t_eng]) + timedelta(seconds=2)
+    span = max(1.0, (end - start).total_seconds())
+    if pods is None:
+        from live import podinfo
+        pods = podinfo.get(cfg)
+    tgt = eng.get("target") or {}
+    att = eng.get("attacker") or {}
+    decoy_ns = cfg["deception"]["namespace"]
+
+    def peer_role(ip: str) -> str:
+        if ip in decoy_ips or (pods.get(ip) or {}).get("namespace") == decoy_ns:
+            return "decoy"
+        return "target"
+
+    n = max(4, min(int(frames), 60))
+    step = span / n
+    edges: dict[str, dict[str, Any]] = {}
+    out_frames = []
+    k = 0
+    for i in range(1, n + 1):
+        t_i = (start + timedelta(seconds=step * i)).isoformat()
+        while k < len(rows) and rows[k]["ts"] <= t_i:
+            r = rows[k]
+            k += 1
+            peer = r["dst_ip"] if r["src_ip"] == src else r["src_ip"]
+            e = edges.setdefault(peer, {"src": src, "dst": peer, "flows": 0, "packets": 0, "malicious": 0,
+                                        "conf": None, "class": None, "redirect": peer_role(peer) == "decoy"})
+            e["flows"] += 1
+            e["packets"] += r["packets"] or 0
+            if r["mal"]:
+                e["malicious"] += 1
+                if r["conf"] is not None and (e["conf"] is None or r["conf"] > e["conf"]):
+                    e["conf"], e["class"] = r["conf"], r["cls"]
+        snap = []
+        for e in edges.values():
+            snap.append({**e, "severity": _severity(e["conf"], e["malicious"] > 0, th)})
+        out_frames.append({"t": t_i, "offset_s": round(step * i, 1), "edges": snap})
+
+    def node(ip: str, role: str) -> dict[str, Any]:
+        p = pods.get(ip) or {}
+        info = att if role == "attacker" else tgt if ip == tgt.get("ip") else {}
+        fallback = f"{rd.get('decoy')} pod" if role == "decoy" and rd.get("decoy") else ip
+        return {"id": ip, "ip": ip, "role": role, "label": info.get("pod") or p.get("pod") or fallback,
+                "namespace": info.get("namespace") or p.get("namespace"), "node": info.get("node") or p.get("node")}
+
+    rd = eng.get("redirect") or {}
+    nodes = [node(src, "attacker")] + [node(ip, peer_role(ip)) for ip in edges]
+
+    def offset(ts: str | None) -> float | None:
+        if not ts:
+            return None
+        t = datetime.fromisoformat(ts)
+        t = t.astimezone(timezone.utc).replace(tzinfo=None) if t.tzinfo else t
+        return round((t - start).total_seconds(), 1)
+
+    ready = min((d.get("ready_at") for d in eng.get("decoy_rows") or [] if d.get("ready_at")), default=None)
+    events = [e for e in (
+        {"kind": "engaged", "label": "attacker engaged", "offset_s": offset(eng["started_at"])},
+        {"kind": "decoy_ready", "label": "decoy ready" if (offset(ready) or 0) >= 0 else "decoy already running",
+         "offset_s": max(0.0, offset(ready)) if ready else None},
+        {"kind": "redirect", "label": "redirected to decoy", "offset_s": offset(rd.get("at")) if rd.get("applied") else None},
+        {"kind": "released", "label": "released", "offset_s": offset(eng.get("released_at"))},
+    ) if e["offset_s"] is not None]
+    return {"id": eng["id"], "src_ip": src, "attack_class": eng.get("attack_class"), "state": eng.get("state"),
+            "start": start.isoformat(), "end": end.isoformat(), "span_s": round(span, 1), "frames": out_frames,
+            "nodes": nodes, "events": events, "flows": len(rows),
+            "to_decoy": sum(e["flows"] for e in edges.values() if e["redirect"]),
+            "to_target": sum(e["flows"] for e in edges.values() if not e["redirect"])}

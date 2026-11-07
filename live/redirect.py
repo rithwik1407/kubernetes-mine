@@ -105,3 +105,50 @@ def release(redirect: dict[str, Any] | None, cfg: dict[str, Any] | None = None, 
             return {"released": True, "reason": "pod no longer exists"}
         return {"released": False, "reason": f"could not remove label: {getattr(e, 'reason', e)}"}
     return {"released": True, "reason": f"label and redirect removed from {redirect['namespace']}/{redirect['pod']}"}
+
+
+def annotate(ip: str, cfg: dict[str, Any] | None = None, core=None, redirect_to: str | None = None,
+             only: list[str] | None = None) -> dict[str, Any]:
+    """Step 1 of a redirect: tell the source pod's generator where to send its traffic
+    (annotations only, no quarantine label yet). The label follows once the generator has
+    confirmed it read the annotation (see `acknowledged`), so the pod is never cut off from
+    the target before it knows about the decoy. Kubelets refresh downward-API files on
+    their own sync period (seconds in the sandbox, up to a minute or more on some nodes);
+    labelling first made every connection in that gap time out against the
+    NetworkPolicy, which slowed the run past its deadline and filled it with SYN-only
+    flows the model calls BENIGN."""
+    cfg = cfg or load_config()
+    st = settings(cfg)
+    if not st["enabled"]:
+        return {"applied": False, "reason": "redirect disabled in config"}
+    try:
+        core = core or _core(cfg)
+        pod = find_pod(ip, cfg, core)
+        if pod is None:
+            return {"applied": False, "reason": f"{ip} is not a running pod in {', '.join(st['namespaces'])}; "
+                                                "only lab pods are ever redirected"}
+        core.patch_namespaced_pod(pod["pod"], pod["namespace"], {"metadata": {"annotations": {
+            REDIRECT_ANNOTATION: redirect_to, ONLY_ANNOTATION: ",".join(only) if only else None}}})
+    except Exception as e:  # noqa: BLE001
+        return {"applied": False, "reason": f"Kubernetes refused the annotation: {getattr(e, 'reason', e)}"}
+    log.info("redirect: %s (%s/%s) told to use %s, waiting for the generator to confirm", ip, pod["namespace"],
+             pod["pod"], redirect_to)
+    return {"annotated": True, **pod, "to": redirect_to}
+
+
+def acknowledged(pod: str, namespace: str, to: str, since_seconds: int, cfg: dict[str, Any] | None = None,
+                 core=None) -> bool:
+    """Has the generator in this pod logged that it now sends traffic to `to`?"""
+    cfg = cfg or load_config()
+    if namespace not in settings(cfg)["namespaces"]:
+        return False
+    try:
+        core = core or _core(cfg)
+        text = core.read_namespaced_pod_log(pod, namespace, since_seconds=max(5, int(since_seconds) + 5),
+                                            _request_timeout=5)
+    except Exception:  # noqa: BLE001 - no log yet / pod gone: not confirmed
+        return False
+    for line in text.splitlines():
+        if '"redirected"' in line and to in line:
+            return True
+    return False

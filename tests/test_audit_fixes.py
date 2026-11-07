@@ -52,7 +52,7 @@ def test_window_mid_rate_holds_and_is_deterministic():
 
 def test_window_policy_description_lists_all_rules():
     p = W.policy_description(WCFG)
-    assert [r["id"] for r in p["rules"]] == ["R1_threat", "R2_high_rate", "R3_calm", "R4_hold"]
+    assert [r["id"] for r in p["rules"]] == ["R0_backlog", "R1_threat", "R2_high_rate", "R3_calm", "R4_hold"]
 
 
 def test_live_config_window_is_valid(cfg):

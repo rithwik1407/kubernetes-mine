@@ -123,7 +123,16 @@ deception:
   enabled_on_start: false
   loop_interval_seconds: 5
   max_active_decoys: 6
-  max_replicas: 3
+  # Decoys per engagement: the redirect only uses the first (preferred) profile of the
+  # class's attack_policy, so one is enough. Raise it to also deploy the next profiles.
+  decoys_per_engagement: 1
+  # Replicas a decoy may scale to (engagement.scale_up_interactions / scale_on_repeat).
+  # 1 = never scale: one lab attacker easily sends 20+ requests, which used to grow the
+  # web-portal decoy to 3 pods.
+  max_replicas: 1
+  # Managed decoys in Kubernetes that no active record uses (left from an older run or
+  # version) are removed after this many seconds. 0 = keep them.
+  orphan_grace_seconds: 120
   decoy_ttl_seconds: 600
   max_lifetime_seconds: 3600
   cooldown_seconds: 15
@@ -172,6 +181,11 @@ deception:
     enabled: true
     namespaces: [ids-traffic]
     label: ids-deception/quarantine
+    # Annotate the pod first and quarantine it only after its generator logged that it
+    # follows the redirect (or after ack_timeout_seconds), so it is never cut off from
+    # the target before it knows where the decoy is.
+    wait_for_ack: true
+    ack_timeout_seconds: 20
   engagement:
     window_seconds: 300
     scale_up_interactions: 20

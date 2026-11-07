@@ -411,8 +411,35 @@ class MapeKController:
             target = json.loads(e.get("target") or "{}")
             only = sorted({h for s in target.get("services") or [] for h in s.get("hosts", [])}
                           | ({target["ip"]} if target.get("pod") and target.get("ip") else set()))
-            new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None) \
-                if self.redirector else {"applied": False, "reason": "redirect not configured"}
+            note = ""
+            if self.redirector and hasattr(self.redirector, "annotate") and self.cfg["deception"].get("redirect", {}).get("wait_for_ack", True):
+                # two steps: annotations first, quarantine label once the generator has confirmed
+                if rd.get("phase") != "annotated" or rd.get("to") != to:
+                    step = self.redirector.annotate(e["src_ip"], self.cfg, redirect_to=to, only=only or None)
+                    if step.get("annotated"):
+                        db.update_row(c, "engagements", e["id"], redirect=json.dumps({
+                            "pending": True, "phase": "annotated", "annotated_at": iso(now_utc()), "to": to,
+                            "decoy": d["name"], "decoy_node": d.get("node"), "only": only,
+                            "pod": step["pod"], "namespace": step["namespace"],
+                            "reason": f"redirect to {to} sent to pod {step['namespace']}/{step['pod']}; "
+                                      "waiting for its generator to confirm before quarantining it"}))
+                        continue
+                    new = {"applied": False, "reason": step.get("reason", "annotation failed")}
+                else:
+                    waited = (now_utc() - parse(rd["annotated_at"])).total_seconds()
+                    limit = float(self.cfg["deception"].get("redirect", {}).get("ack_timeout_seconds", 20))
+                    ack = self.redirector.acknowledged(rd["pod"], rd["namespace"], to, int(waited), self.cfg)
+                    if not ack and waited < limit:
+                        continue
+                    note = (f"; the generator confirmed the redirect {waited:.0f}s after it was sent" if ack else
+                            f"; no confirmation from the generator within {limit:.0f}s, quarantined anyway")
+                    new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None)
+                    new["annotated_at"] = rd["annotated_at"]
+                    new["acknowledged"] = bool(ack)
+            else:
+                new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None) \
+                    if self.redirector else {"applied": False, "reason": "redirect not configured"}
+            new["reason"] = new.get("reason", "") + note
             new["decoy"] = d["name"]
             new["decoy_node"] = d.get("node")
             new["at"] = iso(now_utc())
@@ -547,7 +574,11 @@ class MapeKController:
                 actions.append({**a, "action": "await_evidence" if a["assessment"] == "medium" else "monitor",
                                 "profile": None})
                 continue
-            for profile in self._profiles_for(c, a):
+            # one decoy per engagement by default: the redirect only ever uses the first
+            # (preferred) profile, so a second one was an idle pod
+            n_dec = int(self.d.get("decoys_per_engagement", 1) or 0)
+            profiles = self._profiles_for(c, a)
+            for profile in (profiles[:n_dec] if n_dec > 0 else profiles):
                 name = decoy_name(profile, a.get("target_node"))
                 act = {**a, "profile": profile, "name": name, "node": a.get("target_node")}
                 if name in planned:
@@ -734,6 +765,34 @@ class MapeKController:
             if new != ips:
                 db.update_row(c, "decoys", r["id"], pod_ips=json.dumps(sorted(new)))
 
+    def _remove_orphans(self, c, cycle_id: int, mgr, live: dict[str, dict], tracked: set[str],
+                        now: datetime, out: dict[str, Any]) -> None:
+        """Remove decoys this controller manages in Kubernetes but no longer tracks (left from an
+        older version, a wiped database or a crash). Only objects labelled
+        managed-by=ids-deception-controller are listed, so nothing else is ever touched; a grace
+        period protects a decoy whose deploy is still being recorded."""
+        grace = float(self.d.get("orphan_grace_seconds", 120))
+        if grace <= 0:
+            return
+        for name, k in live.items():
+            if name in tracked:
+                continue
+            created = parse(k.get("created"))
+            if created is None or (now - created).total_seconds() < grace:
+                continue
+            try:
+                mgr.remove(name)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not remove orphan decoy %s: %s", name, e)
+                continue
+            c.execute("UPDATE decoys SET status = 'removed', removed_at = ?, error = COALESCE(error, 'orphan') "
+                      "WHERE name = ? AND removed_at IS NULL", (iso(now), name))
+            self._record(c, cycle_id, trigger="housekeeping", action="remove", decoy_profile=k.get("profile"),
+                         decoy_name=name, result="ok", assessment="n/a",
+                         reason=f"{name} exists in Kubernetes but no active engagement or decoy record uses it "
+                                f"(left over from an earlier run); removed")
+            out.setdefault("orphans", []).append(name)
+
     def housekeeping(self, c, cycle_id: int) -> dict[str, Any]:
         out = {"interactions": 0, "expired": [], "ready": [], "vanished": [], "scaled": []}
         mgr = self.manager
@@ -774,6 +833,7 @@ class MapeKController:
                     continue
             out["interactions"] += self._collect_for(c, r["name"])
 
+        self._remove_orphans(c, cycle_id, mgr, live, {r["name"] for r in rows}, now, out)
         self._apply_redirects(c, cycle_id, out)
         self._release_quiet(c, cycle_id, out)
         e = self.d["engagement"]

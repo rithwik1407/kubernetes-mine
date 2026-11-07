@@ -255,3 +255,61 @@ def test_decoy_pod_is_never_engaged(cfg, monkeypatch):
     _flows("PortScan", 20, 0.99)
     ctl.run_cycle()
     assert mgr.deployed == {} and ctl.engagements() == []
+
+
+def test_one_decoy_per_engagement_and_no_scaling_by_default(cfg):
+    """PortScan maps to [web-portal, k8s-inventory]; only the first (the one the redirect
+    uses) is deployed, and repeated evidence never scales it past max_replicas 1."""
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    _flows("PortScan", 40, 0.98)
+    ctl.run_cycle()
+    _flows("PortScan", 40, 0.98)
+    ctl.run_cycle()
+    assert mgr.deployed == {"decoy-web-portal": 1}
+
+
+class AckRedirector(FakeRedirector):
+    def __init__(self):
+        super().__init__()
+        self.ack = False
+    def annotate(self, ip, cfg, redirect_to=None, only=None):
+        self.calls.append(("annotate", redirect_to))
+        return {"annotated": True, "namespace": "ids-traffic", "pod": "p", "to": redirect_to}
+    def acknowledged(self, pod, ns, to, since, cfg):
+        return self.ack
+
+
+def test_quarantine_label_waits_for_the_generator_to_confirm_the_redirect(cfg):
+    mgr, red = FakeManager(), AckRedirector()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.redirector = red
+    ctl.set_enabled(True)
+    _flows("PortScan", 12, 0.97)
+    ctl.run_cycle()                       # engage + deploy
+    ctl.run_cycle()                       # decoy Ready -> annotations only
+    to = "decoy-web-portal.ids-deception.svc.cluster.local:80"
+    assert red.calls == [("annotate", to)]
+    rd = ctl.engagements()[0]["redirect"]
+    assert rd["pending"] and rd["phase"] == "annotated" and not rd.get("applied")
+    ctl.run_cycle()                       # not confirmed yet, inside the timeout: no label
+    assert red.calls == [("annotate", to)]
+    red.ack = True
+    ctl.run_cycle()                       # the generator logged the redirect -> label
+    assert red.calls[-1] == ("10.42.0.9", to)
+    rd = ctl.engagements()[0]["redirect"]
+    assert rd["applied"] and rd["acknowledged"] and "confirmed" in rd["reason"]
+
+
+def test_orphan_decoys_are_removed_after_the_grace_period(cfg):
+    mgr = FakeManager()
+    mgr.deployed["decoy-web-portal"] = 1          # left over from an older version
+    old = "2020-01-01T00:00:00+00:00"
+    mgr.list_decoys = lambda: {n: {"ready_replicas": 1, "created": old, "profile": "web-portal"} for n in mgr.deployed}
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.run_cycle()
+    assert mgr.deployed == {}
+    with db.connect(DBP[0]) as c:
+        reason = c.execute("SELECT reason FROM decisions WHERE action = 'remove'").fetchone()[0]
+    assert "left over" in reason

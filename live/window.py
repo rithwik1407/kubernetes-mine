@@ -167,6 +167,8 @@ def decide(current_s: float, ev: Evidence, wcfg: dict[str, Any]) -> Decision:
 def policy_description(wcfg: dict[str, Any]) -> dict[str, Any]:
     """Human-readable policy for the dashboard and the docs."""
     sizes = window_sizes(wcfg)
+    thr = snap(float(wcfg.get("threat_seconds", sizes[0])), sizes)
+    calm = int(wcfg.get("calm_windows", 3))
     return {
         "sizes": sizes, "min_seconds": sizes[0], "max_seconds": sizes[-1], "initial_seconds": initial_window(wcfg),
         "threat_seconds": snap(float(wcfg.get("threat_seconds", sizes[0])), sizes),
@@ -174,11 +176,31 @@ def policy_description(wcfg: dict[str, Any]) -> dict[str, Any]:
         "calm_windows": int(wcfg.get("calm_windows", 3)),
         "evidence_confidence": float(wcfg.get("evidence_confidence", 0.6)),
         "rules": [
+            {"id": "R0_backlog", "when": "scoring cannot keep up: 2 or more windows are waiting, or the last window "
+             "took longer to convert and score than it lasted", "then": "grow to the smallest size that is at least "
+             "that processing time (at least one size larger)",
+             "why": "otherwise windows queue up and detections arrive minutes late"},
             {"id": "R1_threat", "when": "the latest scored window has malicious ML flows (confidence >= "
-             f"{float(wcfg.get('evidence_confidence', 0.6)):g}) or a flow burst", "then": f"shrink to {snap(float(wcfg.get('threat_seconds', sizes[0])), sizes):g}s (or stay if already shorter)"},
-            {"id": "R2_high_rate", "when": f"packet rate >= {wcfg['high_rate_pps']} pkt/s", "then": "one size smaller"},
-            {"id": "R3_calm", "when": f"{int(wcfg.get('calm_windows', 3))} scored windows in a row without threat evidence "
-             f"and packet rate <= {wcfg['low_rate_pps']} pkt/s", "then": "one size larger"},
-            {"id": "R4_hold", "when": "none of the above", "then": "keep the current size"},
+             f"{float(wcfg.get('evidence_confidence', 0.6)):g}) or a flow burst",
+             "then": f"shrink to {thr:g}s (stay if already shorter)",
+             "why": "re-score the attack sooner; not the minimum, because very short windows cut TCP flows in pieces"},
+            {"id": "R2_high_rate", "when": f"packet rate >= {wcfg['high_rate_pps']} pkt/s",
+             "then": "one size smaller (never below the last processing time)",
+             "why": "keeps each PCAP small so it is scored quickly"},
+            {"id": "R3_calm", "when": f"{calm} scored windows in a row without threat evidence "
+             f"and packet rate <= {wcfg['low_rate_pps']} pkt/s", "then": "one size larger",
+             "why": "longer windows give more complete flows and less overhead when nothing happens"},
+            {"id": "R4_hold", "when": "none of the above", "then": "keep the current size",
+             "why": "no evidence to change"},
+        ],
+        "settings": [
+            {"key": "sizes", "value": ", ".join(f"{x:g} s" for x in sizes), "meaning": "the only window lengths the policy picks from"},
+            {"key": "default_seconds", "value": f"{initial_window(wcfg):g} s", "meaning": "first window after capture starts"},
+            {"key": "threat_seconds", "value": f"{thr:g} s", "meaning": "size R1 shrinks to while an attack is seen"},
+            {"key": "high_rate_pps", "value": f"{wcfg['high_rate_pps']} pkt/s", "meaning": "at or above this rate R2 shrinks the window"},
+            {"key": "low_rate_pps", "value": f"{wcfg['low_rate_pps']} pkt/s", "meaning": "at or below this rate (and calm) R3 grows the window"},
+            {"key": "calm_windows", "value": str(calm), "meaning": "scored windows without threat needed before R3 grows the window"},
+            {"key": "evidence_confidence", "value": f"{float(wcfg.get('evidence_confidence', 0.6)):g}",
+             "meaning": "a malicious ML flow counts as threat evidence for R1 only at this confidence or above"},
         ],
     }

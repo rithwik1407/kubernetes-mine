@@ -62,6 +62,9 @@ PAYLOAD_SET = os.environ.get("PAYLOAD_SET", "mixed")   # web_attack: mixed | sql
 # is killed by Kubernetes, its pod is deleted and the only trace is "DeadlineExceeded".
 TIME_BUDGET_S = float(os.environ.get("TIME_BUDGET_S", "0"))   # 0 = unlimited
 _T0 = time.monotonic()
+# Wall-clock end set when the Job was created (activeDeadlineSeconds minus a margin), so a
+# pod that started late (image pull, busy node) still stops before Kubernetes kills it.
+JOB_DEADLINE_EPOCH = float(os.environ.get("JOB_DEADLINE_EPOCH", "0") or 0)
 _COUNTS = {"ok": 0, "errors": 0}
 _NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected"}
 # Deception redirect. The pod's own annotations are mounted here through the downward
@@ -113,11 +116,14 @@ def parallel(items, fn) -> None:
 
 def out_of_time() -> bool:
     """True (and logged once) when the time budget is used up; callers stop their loop."""
-    if TIME_BUDGET_S <= 0 or time.monotonic() - _T0 < TIME_BUDGET_S:
+    over_budget = TIME_BUDGET_S > 0 and time.monotonic() - _T0 >= TIME_BUDGET_S
+    past_deadline = JOB_DEADLINE_EPOCH > 0 and time.time() >= JOB_DEADLINE_EPOCH
+    if not (over_budget or past_deadline):
         return False
     if not _COUNTS.get("budget_logged"):
         _COUNTS["budget_logged"] = 1
-        emit(action="budget_exhausted", note=f"stopped after {TIME_BUDGET_S:.0f}s time budget",
+        emit(action="budget_exhausted", note=(f"stopped after {TIME_BUDGET_S:.0f}s time budget" if over_budget else
+                                               "stopped before the Job's deadline (the pod started late)"),
              answered=_COUNTS["ok"], failed=_COUNTS["errors"])
     return True
 

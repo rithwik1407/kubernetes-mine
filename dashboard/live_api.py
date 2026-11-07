@@ -552,6 +552,17 @@ def deception_live(limit: int = Query(20, ge=1, le=200)):
     return controller().engagement_details(limit)
 
 
+@router.get("/api/deception/engagements/{eid}/replay")
+def deception_replay(eid: int, frames: int = Query(24, ge=4, le=60)):
+    """The full traffic of one engagement in time steps (attacker -> target, then -> decoy),
+    with the engaged / decoy ready / redirected / released moments, for the "View flow" replay."""
+    engs = controller().engagement_details(200)["engagements"]
+    eng = next((e for e in engs if e["id"] == eid), None)
+    if eng is None:
+        raise HTTPException(404, f"engagement {eid} not found (only the latest 200 are kept for replay)")
+    return queries.engagement_replay(eng, CFG, frames)
+
+
 @router.get("/api/live/allowlist")
 def live_allowlist():
     from live import allowlist
