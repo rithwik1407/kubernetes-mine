@@ -272,3 +272,29 @@ def test_parse_timestamps_iso_is_not_day_swapped():
     from live.schema import parse_timestamps
     got = parse_timestamps(pd.Series(["2026-11-05 11:00:12.836503", "30/10/2026 12:19:24 PM", "05/11/2026 11:00:12 AM"]))
     assert [str(t.date()) for t in got] == ["2026-11-05", "2026-10-30", "2026-11-05"]
+
+
+def test_predictor_falls_back_when_live_model_missing(cfg, tmp_path):
+    import copy
+    from live.predictor import FlowPredictor
+    c = copy.deepcopy(cfg)
+    c["paths"]["model_dir"] = str(tmp_path / "missing")
+    p = FlowPredictor.from_config(c)
+    assert p.name == Path(c["paths"]["fallback_model_dir"]).name
+
+
+def test_allowlist_discovers_node_bridge_for_kubelet_probes(monkeypatch):
+    from live import allowlist as al
+    node = NS(metadata=NS(name="vm"), spec=NS(pod_cidrs=["10.42.0.0/24"], pod_cidr="10.42.0.0/24"))
+    core = NS(read_namespaced_service=lambda *a, **k: (_ for _ in ()).throw(RuntimeError("x")),
+              list_namespaced_pod=lambda *a, **k: NS(items=[]), list_namespaced_service=lambda *a, **k: NS(items=[]),
+              list_node=lambda **k: NS(items=[node]))
+    import kubernetes.client
+    monkeypatch.setattr(kubernetes.client, "CoreV1Api", lambda api: core)
+    import live.kube
+    monkeypatch.setattr(live.kube, "api_client", lambda cfg: (None, "test"))
+    ips, _ = al._discover({})
+    assert "bridge" in ips["10.42.0.1"]
+    a = al.Allowlist(ips=ips)
+    assert a.reason("10.42.0.1", "10.42.0.157", 50320, 8081)      # probe to a decoy: never an attack
+    assert a.reason("10.42.0.156", "10.42.0.138", 40000, 8086) is None

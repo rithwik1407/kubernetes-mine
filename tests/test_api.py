@@ -113,8 +113,9 @@ def test_capture_start_unsupported_is_503_not_200(client, monkeypatch):
 
 def test_predict_and_labelled_evaluation(client):
     import pandas as pd
-    rows = pd.read_csv(REPO / "dashboard" / "sample_cic2017_test_mix.csv", nrows=20)
-    labels = rows.pop("Label")
+    # the live model is the lab model: score its own held-out lab flows
+    rows = pd.read_csv(REPO / "dashboard" / "sample_lab_test_mix.csv").sample(20, random_state=1)
+    labels = rows.pop("Label").tolist()
     r = client.post("/api/predict", json={"records": rows.to_dict(orient="records")})
     assert r.status_code == 200
     preds = r.json()["predictions"]
@@ -122,13 +123,17 @@ def test_predict_and_labelled_evaluation(client):
     assert {"predicted_class", "confidence", "is_malicious", "detected_at", "flow_id"} <= set(preds[0])
     assert sum(p["predicted_class"] == t for p, t in zip(preds, labels)) >= 18
     e = client.get("/api/model/evaluate-sample").json()
-    assert e["rows"] == 2230 and e["accuracy"] > 0.95
+    assert e["sample"] == "sample_lab_test_mix.csv" and e["rows"] == 2366 and e["accuracy"] > 0.85
     assert len(e["confusion_matrix"]) == len(e["classes"])
 
 
 def test_model_info_comes_from_artifacts(client):
-    m = client.get("/api/model").json()
-    assert m["name"] == "cic-ids2017-lab" and m["n_features"] == 68
+    live = client.get("/api/model").json()               # trained on this lab's own CICFlowMeter flows
+    assert live["name"] == "k8s-lab-live" and live["n_features"] == 68 and live["source"]
+    assert set(live["classes"]) == {"BENIGN", "BruteForce", "DoS", "PortScan", "WebAttack"}
+    assert live["test_samples"] > 0 and live["models"]["RandomForest"]["confusion_matrix"]
+    m = client.get("/api/model?which=scorer").json()
+    assert m["n_features"] == 68 and m["source"] is None
     assert set(m["classes"]) == {"BENIGN", "Bot", "BruteForce", "DDoS", "DoS", "PortScan", "WebAttack"}
     bot = next(x for x in m["reliability"] if x["class"] == "Bot")
     assert bot["reliable"] is False        # few samples, F1 0.72: never claimed reliable

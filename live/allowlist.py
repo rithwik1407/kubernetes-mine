@@ -10,6 +10,7 @@ A flow is allowlisted when either end is control-plane infrastructure:
   * a control-plane port (API server 6443, kubelet 10250, etcd, scheduler, ...)
   * the `kubernetes` Service IP or one of its endpoint addresses (the API server)
   * a pod or Service in kube-system (CoreDNS, metrics-server, ...)
+  * the node's pod-bridge address (kubelet health probes)
   * an extra CIDR from config (detection.allowlist.cidrs)
 
 Allowlisted flows keep their model prediction (for transparency) but get
@@ -114,6 +115,18 @@ def _discover(cfg: dict[str, Any]) -> tuple[dict[str, str], str | None]:
                 ips[s.spec.cluster_ip] = f"kube-system Service ({s.metadata.name})"
     except Exception as e:  # noqa: BLE001
         errors.append(f"kube-system lookup: {getattr(e, 'status', '')} {getattr(e, 'reason', e)}")
+    try:
+        # kubelet health probes reach pods from the node's bridge address (the first IP of its
+        # pod CIDR, e.g. 10.42.0.1). A new pod refuses them until it listens, and those short
+        # refused flows look like a scan (measured: decoy pods' :8081 probes predicted PortScan).
+        for n in core.list_node(_request_timeout=5).items:
+            for cidr in (n.spec.pod_cidrs or [n.spec.pod_cidr] if n.spec else []):
+                if cidr:
+                    gw = next(ipaddress.ip_network(cidr, strict=False).hosts(), None)
+                    if gw:
+                        ips[str(gw)] = f"node {n.metadata.name} bridge (kubelet probes)"
+    except Exception as e:  # noqa: BLE001
+        errors.append(f"node lookup: {getattr(e, 'status', '')} {getattr(e, 'reason', e)}")
     return ips, "; ".join(errors) or None
 
 

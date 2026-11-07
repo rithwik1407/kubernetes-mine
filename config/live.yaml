@@ -2,7 +2,10 @@
 # Relative paths resolve against the repo root. Override location with IDS_CONFIG.
 
 paths:
-  model_dir: models/cic-ids2017-lab      # best_model.joblib + metrics.json live here
+  # Live model: trained on this lab's own CICFlowMeter flows (scripts/train_lab_model.py).
+  model_dir: models/k8s-lab-live          # best_model.joblib + metrics.json live here
+  # Used when model_dir has no best_model.joblib (the CIC-IDS2017 + lab-benign model).
+  fallback_model_dir: models/cic-ids2017-lab
   pipeline_dir: ml                   # prepare.py, for the CICFlowMeter column mapping
   pcap_dir: captures/pcap
   flows_dir: captures/flows

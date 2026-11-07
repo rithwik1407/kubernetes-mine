@@ -273,19 +273,26 @@ def predict(req: PredictRequest):
 
 @router.get("/api/model/evaluate-sample")
 def evaluate_sample():
-    """Score the bundled *labelled* held-out CIC-IDS2017 rows with the live model and compare to the labels.
+    """Score bundled *labelled* held-out rows with the live model and compare to the labels.
+
+    The rows are the ones that match the live model: its metrics.json names them in
+    eval_sample (the lab model: flows from capture sessions it was never trained on);
+    otherwise the CIC-IDS2017 test mix.
 
     This is the labelled check for benign vs malicious classification; it does not
     touch the database and every number comes from this run.
     """
     import numpy as np
     import pandas as pd
-    path = REPO_ROOT / "dashboard" / "sample_cic2017_test_mix.csv"
+    import json
+    p = predictor()
+    mpath = p.model_dir / "metrics.json"
+    rel = (json.loads(mpath.read_text()).get("eval_sample") if mpath.is_file() else None) or "dashboard/sample_cic2017_test_mix.csv"
+    path = REPO_ROOT / rel
     if not path.is_file():
-        raise HTTPException(404, "sample_cic2017_test_mix.csv is missing")
+        raise HTTPException(404, f"{path.name} is missing")
     df = pd.read_csv(path)
     df = df[df["Label"].astype(str) != "Label"].reset_index(drop=True)
-    p = predictor()
     out = p.predict_frame(df.drop(columns=["Label"]), source="upload")
     truth = df["Label"].astype(str).to_numpy()
     pred = out["predicted_class"].astype(str).to_numpy()
@@ -302,7 +309,7 @@ def evaluate_sample():
                   "f1": (2 * prec * rec / (prec + rec)) if prec and rec else 0.0}
     benign = p.benign_class
     att_t, att_p = truth != benign, pred != benign
-    return {"model": p.name, "rows": int(len(df)), "accuracy": float((truth == pred).mean()), "classes": classes,
+    return {"model": p.name, "sample": path.name, "rows": int(len(df)), "accuracy": float((truth == pred).mean()), "classes": classes,
             "confusion_matrix": cm, "per_class": per,
             "binary": {"attack_detection_rate": float(att_p[att_t].mean()) if att_t.any() else None,
                        "false_alarm_rate": float(att_p[~att_t].mean()) if (~att_t).any() else None},

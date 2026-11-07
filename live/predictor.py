@@ -11,10 +11,13 @@ import numpy as np
 import pandas as pd
 
 from live.config import get_path, load_config
+from live.logging_setup import get_logger
 from live.schema import (
     DST_IP, DST_PORT, FLOW_ID, LABEL, PROTOCOL, SRC_IP, SRC_PORT, TIMESTAMP,
     SchemaError, align_features, drop_non_ip_flows, parse_timestamps, read_flow_csv,
 )
+
+log = get_logger(__name__)
 
 PREDICTION_COLUMNS = [
     "flow_id", "timestamp", "src_ip", "src_port", "dst_ip", "dst_port", "protocol",
@@ -69,7 +72,12 @@ class FlowPredictor:
     @classmethod
     def from_config(cls, cfg: dict[str, Any] | None = None) -> "FlowPredictor":
         cfg = cfg or load_config()
-        return cls(get_path("model_dir", cfg), cfg)
+        primary = get_path("model_dir", cfg)
+        if not (primary / "best_model.joblib").is_file() and cfg.get("paths", {}).get("fallback_model_dir"):
+            fallback = get_path("fallback_model_dir", cfg)
+            log.warning("no model in %s, using fallback %s", primary, fallback)
+            return cls(fallback, cfg)
+        return cls(primary, cfg)
 
     def predict_frame(self, df: pd.DataFrame, capture_file: str | None = None,
                       source: str = "unknown") -> pd.DataFrame:

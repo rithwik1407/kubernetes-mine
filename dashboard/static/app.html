@@ -267,7 +267,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <section class="page" id="p-threats" data-title="Threat detection" data-sub="Multi-class predictions from the CIC-IDS2017 model, plus behaviour rules for reconnaissance">
     <div class="grid two">
       <div class="card"><h2>Classes this model supports</h2><p class="hint">Only classes the trained model can output. Reliability comes from its held-out test set.</p><div id="thClasses"><div class="loading">Loading model…</div></div></div>
-      <div class="card"><div class="card-head"><div><h2>Labelled check</h2><p class="hint">Score 2,230 labelled held-out CIC-IDS2017 flows with the live model and compare to their labels.</p></div><button class="btn" id="evalBtn">Run labelled check</button></div><div id="evalOut"><div class="empty"><b>Not run yet</b>Press the button to measure accuracy on labelled traffic now.</div></div></div>
+      <div class="card"><div class="card-head"><div><h2>Labelled check</h2><p class="hint">Score labelled held-out flows (never used in training) with the live model and compare to their labels.</p></div><button class="btn" id="evalBtn">Run labelled check</button></div><div id="evalOut"><div class="empty"><b>Not run yet</b>Press the button to measure accuracy on labelled traffic now.</div></div></div>
     </div>
     <div class="card" style="margin-top:14px">
       <div class="card-head"><div><h2>Malicious detections</h2><p class="hint">Flows the model classified as an attack, with confidence and the flow facts behind them</p></div></div>
@@ -657,7 +657,7 @@ async function pageThreats(full) {
   $("thClasses").innerHTML = table([
     { h: "Class", f: r => clsTag(r.class) }, { h: "Training flows", num: 1, f: r => fmt(r.train_samples) },
     { h: "Test F1", num: 1, f: r => fmt(r.f1, 3) }, { h: "Detection", f: r => r.class === "BENIGN" ? "—" : (r.reliable ? pill("reliable", "ok") : pill("limited", "degraded")) },
-  ], md.reliability, { maxH: "320px" }) + `<p class="hint" style="margin-top:8px">${esc(md.reliability_rule)}. Not in this model: Infiltration and Heartbleed (too few samples, dropped in training). Model: ${esc(md.best_model)} (${esc(md.name)}), macro F1 ${fmt(best.macro_f1, 4)}.</p>`;
+  ], md.reliability, { maxH: "320px" }) + `<p class="hint" style="margin-top:8px">${esc(md.reliability_rule)}. ${md.source ? "Trained on " + esc(md.source) + "." : "Not in this model: Infiltration and Heartbleed (too few samples, dropped in training)."} Model: ${esc(md.best_model)} (${esc(md.name)}), macro F1 ${fmt(best.macro_f1, 4)}.</p>`;
   const sel = $("thClass"); if (sel.options.length === 1) md.classes.filter(c => c !== "BENIGN").forEach(c => sel.add(new Option(c, c)));
   const q = new URLSearchParams({ limit: 300, malicious: true }); if (sel.value) q.set("predicted_class", sel.value);
   const [rows, bursts, bcount] = await Promise.all([api("/api/live/detections?" + q), api("/api/live/bursts?limit=100"), api("/api/live/bursts/count")]);
@@ -682,7 +682,7 @@ async function pageThreats(full) {
 async function runEval(btn) {
   const r = await act(btn, () => api("/api/model/evaluate-sample"), r => `Labelled check: accuracy ${pct(r.accuracy, 2)}`);
   if (!r) return;
-  $("evalOut").innerHTML = `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(130px,1fr))">${kpi("Accuracy", pct(r.accuracy, 2), fmt(r.rows) + " labelled flows")}${kpi("Attack detection", pct(r.binary.attack_detection_rate, 2))}${kpi("False alarms", pct(r.binary.false_alarm_rate, 3))}</div>` +
+  $("evalOut").innerHTML = `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(130px,1fr))">${kpi("Accuracy", pct(r.accuracy, 2), fmt(r.rows) + " labelled flows · " + esc(r.sample || ""))}${kpi("Attack detection", pct(r.binary.attack_detection_rate, 2))}${kpi("False alarms", pct(r.binary.false_alarm_rate, 3))}</div>` +
     table([{ h: "Class", f: x => clsTag(x.c) }, { h: "Flows", num: 1, f: x => fmt(x.support) }, { h: "Precision", num: 1, f: x => fmt(x.precision, 3) }, { h: "Recall", num: 1, f: x => fmt(x.recall, 3) }, { h: "F1", num: 1, f: x => fmt(x.f1, 3) }],
       Object.entries(r.per_class).map(([c, v]) => Object.assign({ c }, v)), { maxH: "260px" });
 }
@@ -925,7 +925,7 @@ async function pageModel(full) {
   const macroP = per.reduce((a, r) => a + r.precision, 0) / per.length, macroR = per.reduce((a, r) => a + r.recall, 0) / per.length;
   $("mdPerClass").innerHTML = table([{ h: "Class", f: r => clsTag(r.c) }, { h: "Precision", num: 1, f: r => fmt(r.precision, 4) }, { h: "Recall", num: 1, f: r => fmt(r.recall, 4) },
     { h: "F1", num: 1, f: r => fmt(r.f1, 4) }, { h: "Test support", num: 1, f: r => fmt(r.support) }], per, { maxH: "320px" }) +
-    `<p class="hint" style="margin-top:8px">Macro precision ${fmt(macroP, 4)} · macro recall ${fmt(macroR, 4)}. Bot is the weakest class (few training flows): treat Bot alerts with care.</p>`;
+    `<p class="hint" style="margin-top:8px">Macro precision ${fmt(macroP, 4)} · macro recall ${fmt(macroR, 4)}. ${md.source ? "Test set: whole capture sessions held out from training (other targets and rates)." : "Bot is the weakest class (few training flows): treat Bot alerts with care."}</p>`;
   const tr = (md.split_counts || {}).train || {}, cls = md.classes;
   plot("mdDist", [{ type: "bar", x: cls, y: cls.map(c => tr[c] || 0), marker: { color: cls.map(classColor) }, text: cls.map(c => fmt(tr[c])), textposition: "outside", cliponaxis: false, hovertemplate: "%{x}: %{y:,} training flows<extra></extra>" }],
     { yaxis: Object.assign(layout().yaxis, { type: "log", rangemode: "normal" }) });
@@ -939,6 +939,7 @@ async function pageModel(full) {
     <dt>NaN / inf rows dropped</dt><dd>${fmt(ds.rows_with_nan_or_inf_dropped)}</dd><dt>Rare labels dropped</dt><dd>${fmt(ds.dropped_rare_labels)} rows (Infiltration, Heartbleed)</dd>
     <dt>Final rows</dt><dd>${fmt(ds.final_rows)}</dd><dt>Constant columns dropped</dt><dd class="mono">${esc((ds.constant_columns_dropped || []).join(", "))}</dd></dl>
     <details style="margin-top:10px"><summary class="hint" style="cursor:pointer">Raw CIC-IDS2017 label counts</summary>${table([{ h: "Label", k: "l" }, { h: "Rows", num: 1, f: r => fmt(r.n) }], Object.entries(ds.raw_label_counts || {}).map(([l, n]) => ({ l, n })), { maxH: "240px" })}</details>`
+    : md.source ? `<dl class="kv"><dt>Source</dt><dd>${esc(md.source)}</dd><dt>Training flows</dt><dd>${fmt(md.train_samples)}</dd><dt>Held-out test flows</dt><dd>${fmt(md.test_samples)}</dd></dl>`
     : empty("No prepare_report.json", "Dataset statistics are not available for this model folder.");
 }
 

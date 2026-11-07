@@ -1,0 +1,399 @@
+{
+ "trained_at": "2026-11-07T18:24:32.107460+00:00",
+ "features": [
+  "flowduration",
+  "totalfwdpackets",
+  "totalbackwardpackets",
+  "totallengthoffwdpackets",
+  "totallengthofbwdpackets",
+  "fwdpacketlengthmax",
+  "fwdpacketlengthmin",
+  "fwdpacketlengthmean",
+  "fwdpacketlengthstd",
+  "bwdpacketlengthmax",
+  "bwdpacketlengthmin",
+  "bwdpacketlengthmean",
+  "bwdpacketlengthstd",
+  "flowbytess",
+  "flowpacketss",
+  "flowiatmean",
+  "flowiatstd",
+  "flowiatmax",
+  "flowiatmin",
+  "fwdiattotal",
+  "fwdiatmean",
+  "fwdiatstd",
+  "fwdiatmax",
+  "fwdiatmin",
+  "bwdiattotal",
+  "bwdiatmean",
+  "bwdiatstd",
+  "bwdiatmax",
+  "bwdiatmin",
+  "fwdpshflags",
+  "fwdurgflags",
+  "fwdheaderlength",
+  "bwdheaderlength",
+  "fwdpacketss",
+  "bwdpacketss",
+  "minpacketlength",
+  "maxpacketlength",
+  "packetlengthmean",
+  "packetlengthstd",
+  "packetlengthvariance",
+  "finflagcount",
+  "synflagcount",
+  "rstflagcount",
+  "pshflagcount",
+  "ackflagcount",
+  "urgflagcount",
+  "cweflagcount",
+  "eceflagcount",
+  "downupratio",
+  "averagepacketsize",
+  "avgfwdsegmentsize",
+  "avgbwdsegmentsize",
+  "subflowfwdpackets",
+  "subflowfwdbytes",
+  "subflowbwdpackets",
+  "subflowbwdbytes",
+  "initwinbytesforward",
+  "initwinbytesbackward",
+  "actdatapktfwd",
+  "minsegsizeforward",
+  "activemean",
+  "activestd",
+  "activemax",
+  "activemin",
+  "idlemean",
+  "idlestd",
+  "idlemax",
+  "idlemin"
+ ],
+ "classes": [
+  "BENIGN",
+  "BruteForce",
+  "DoS",
+  "PortScan",
+  "WebAttack"
+ ],
+ "best_model": "RandomForest",
+ "models": {
+  "RandomForest": {
+   "accuracy": 0.9500190766882869,
+   "macro_f1": 0.9251976535691894,
+   "weighted_f1": 0.9471007222496993,
+   "attack_detection_rate": 0.9013490725126475,
+   "false_alarm_rate": 0.00975609756097561,
+   "per_class": {
+    "BENIGN": {
+     "precision": 0.923927178153446,
+     "recall": 0.9902439024390244,
+     "f1": 0.9559367642112344,
+     "support": 2870
+    },
+    "BruteForce": {
+     "precision": 1.0,
+     "recall": 0.9554655870445344,
+     "f1": 0.9772256728778468,
+     "support": 494
+    },
+    "DoS": {
+     "precision": 1.0,
+     "recall": 0.6380753138075314,
+     "f1": 0.7790549169859514,
+     "support": 478
+    },
+    "PortScan": {
+     "precision": 1.0,
+     "recall": 1.0,
+     "f1": 1.0,
+     "support": 1006
+    },
+    "WebAttack": {
+     "precision": 0.9268929503916449,
+     "recall": 0.9010152284263959,
+     "f1": 0.9137709137709138,
+     "support": 394
+    }
+   },
+   "fit_seconds": 1.4,
+   "predict_seconds": 0.08,
+   "confusion_matrix": [
+    [
+     2842,
+     0,
+     0,
+     0,
+     28
+    ],
+    [
+     22,
+     472,
+     0,
+     0,
+     0
+    ],
+    [
+     173,
+     0,
+     305,
+     0,
+     0
+    ],
+    [
+     0,
+     0,
+     0,
+     1006,
+     0
+    ],
+    [
+     39,
+     0,
+     0,
+     0,
+     355
+    ]
+   ]
+  }
+ },
+ "split_counts": {
+  "train": {
+   "BENIGN": 9695,
+   "PortScan": 2989,
+   "DoS": 2521,
+   "WebAttack": 1525,
+   "BruteForce": 1463
+  },
+  "test": {
+   "BENIGN": 2870,
+   "PortScan": 1006,
+   "BruteForce": 494,
+   "DoS": 478,
+   "WebAttack": 394
+  }
+ },
+ "source": "K3s lab flows from the live CICFlowMeter, labelled by Traffic-lab runs (test = whole held-out capture sessions)",
+ "train_sessions": [
+  {
+   "session": 3,
+   "jobs": [
+    "port_scan traffic-port-scan-w2mpz"
+   ],
+   "flows": 1552,
+   "labels": {
+    "PortScan": 976,
+    "BENIGN": 576
+   }
+  },
+  {
+   "session": 4,
+   "jobs": [
+    "brute_force traffic-brute-force-z6kr4"
+   ],
+   "flows": 1170,
+   "labels": {
+    "BENIGN": 688,
+    "BruteForce": 482
+   }
+  },
+  {
+   "session": 5,
+   "jobs": [
+    "web_attack traffic-web-attack-v2p2z"
+   ],
+   "flows": 1131,
+   "labels": {
+    "BENIGN": 744,
+    "WebAttack": 387
+   }
+  },
+  {
+   "session": 6,
+   "jobs": [
+    "web_recon traffic-web-recon-nrvl8"
+   ],
+   "flows": 365,
+   "labels": {
+    "BENIGN": 365
+   }
+  },
+  {
+   "session": 7,
+   "jobs": [
+    "decoy_probe traffic-decoy-probe-czxkk"
+   ],
+   "flows": 332,
+   "labels": {
+    "BENIGN": 332
+   }
+  },
+  {
+   "session": 8,
+   "jobs": [
+    "port_scan traffic-port-scan-kqfpx"
+   ],
+   "flows": 1359,
+   "labels": {
+    "PortScan": 1006,
+    "BENIGN": 353
+   }
+  },
+  {
+   "session": 9,
+   "jobs": [
+    "port_scan traffic-port-scan-kgvqs"
+   ],
+   "flows": 1235,
+   "labels": {
+    "PortScan": 1007,
+    "BENIGN": 228
+   }
+  },
+  {
+   "session": 10,
+   "jobs": [
+    "brute_force traffic-brute-force-jlsj2"
+   ],
+   "flows": 848,
+   "labels": {
+    "BruteForce": 490,
+    "BENIGN": 358
+   }
+  },
+  {
+   "session": 11,
+   "jobs": [
+    "brute_force traffic-brute-force-vjgq8"
+   ],
+   "flows": 727,
+   "labels": {
+    "BruteForce": 491,
+    "BENIGN": 236
+   }
+  },
+  {
+   "session": 12,
+   "jobs": [
+    "web_attack traffic-web-attack-hxm4k"
+   ],
+   "flows": 792,
+   "labels": {
+    "BENIGN": 398,
+    "WebAttack": 394
+   }
+  },
+  {
+   "session": 13,
+   "jobs": [
+    "web_attack traffic-web-attack-fc4tq"
+   ],
+   "flows": 980,
+   "labels": {
+    "WebAttack": 744,
+    "BENIGN": 236
+   }
+  },
+  {
+   "session": 14,
+   "jobs": [
+    "slow_dos traffic-slow-dos-srl64"
+   ],
+   "flows": 1599,
+   "labels": {
+    "DoS": 1191,
+    "BENIGN": 408
+   }
+  },
+  {
+   "session": 15,
+   "jobs": [
+    "slow_dos traffic-slow-dos-zm4dn"
+   ],
+   "flows": 1617,
+   "labels": {
+    "DoS": 1330,
+    "BENIGN": 287
+   }
+  },
+  {
+   "session": 16,
+   "jobs": [
+    "benign traffic-benign-cjfjp"
+   ],
+   "flows": 2002,
+   "labels": {
+    "BENIGN": 2002
+   }
+  },
+  {
+   "session": 17,
+   "jobs": [
+    "web_recon traffic-web-recon-5ttkg"
+   ],
+   "flows": 197,
+   "labels": {
+    "BENIGN": 197
+   }
+  }
+ ],
+ "test_sessions": [
+  {
+   "session": 18,
+   "jobs": [
+    "port_scan traffic-port-scan-ndt4t"
+   ],
+   "flows": 1276,
+   "labels": {
+    "PortScan": 1006,
+    "BENIGN": 270
+   }
+  },
+  {
+   "session": 19,
+   "jobs": [
+    "brute_force traffic-brute-force-xfbvv"
+   ],
+   "flows": 975,
+   "labels": {
+    "BruteForce": 494,
+    "BENIGN": 481
+   }
+  },
+  {
+   "session": 20,
+   "jobs": [
+    "web_attack traffic-web-attack-sbz2m"
+   ],
+   "flows": 670,
+   "labels": {
+    "WebAttack": 394,
+    "BENIGN": 276
+   }
+  },
+  {
+   "session": 21,
+   "jobs": [
+    "slow_dos traffic-slow-dos-l7xkh"
+   ],
+   "flows": 831,
+   "labels": {
+    "DoS": 478,
+    "BENIGN": 353
+   }
+  },
+  {
+   "session": 22,
+   "jobs": [
+    "benign traffic-benign-kn4c8"
+   ],
+   "flows": 1490,
+   "labels": {
+    "BENIGN": 1490
+   }
+  }
+ ],
+ "lab_benign_flows": 2287,
+ "eval_sample": "dashboard/sample_lab_test_mix.csv"
+}

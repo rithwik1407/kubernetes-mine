@@ -111,13 +111,13 @@ def _model_info(model_dir: Path) -> dict:
     split = m.get("split_counts") or {}
     train = split.get("train") or {}
     rep_path = model_dir / "prepare_report.json"
-    if not rep_path.is_file():  # the lab model is built from the same prepared CIC data
+    if not rep_path.is_file() and not m.get("source"):  # the cic-ids2017-lab model is built from the same prepared CIC data
         rep_path = model_dir.parent / "cic-ids2017" / "prepare_report.json"
     report = json.loads(rep_path.read_text()) if rep_path.is_file() else None
     per = (m["models"].get(best) or {}).get("per_class", {})
     min_reliable = 1000
     return {
-        "name": model_dir.name, "best_model": best, "classes": m["classes"], "features": m.get("features"),
+        "name": model_dir.name, "source": m.get("source"), "best_model": best, "classes": m["classes"], "features": m.get("features"),
         "n_features": len(m.get("features") or []),
         "version": {"sha256": h.hexdigest()[:16], "modified": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(bundle_path.stat().st_mtime)),
                     "size_mb": round(bundle_path.stat().st_size / 2**20, 1)},
