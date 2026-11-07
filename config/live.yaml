@@ -144,8 +144,11 @@ deception:
     PortScan:   {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
     DoS:        {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
     DDoS:       {min_confidence: 0.80, min_flows: 20, window_seconds: 60, mean_confidence: 0.85}
-    BruteForce: {min_confidence: 0.80, min_flows: 5,  window_seconds: 60, mean_confidence: 0.85}
-    WebAttack:  {min_confidence: 0.80, min_flows: 3,  window_seconds: 60, mean_confidence: 0.85}
+    # Lab model, live runs: the always-on benign generator reached at most 3 WebAttack flows
+    # >= 0.80 from one source in 60 s (large Grafana pages); real brute-force / web-attack
+    # runs reached 72-337. 10 keeps that benign pod out of quarantine.
+    BruteForce: {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
+    WebAttack:  {min_confidence: 0.80, min_flows: 10, window_seconds: 60, mean_confidence: 0.85}
     Bot:        {min_confidence: 0.90, min_flows: 5,  window_seconds: 120, mean_confidence: 0.95}   # weakest class (F1 0.72)
   # Hysteresis: an engaged source stays engaged while its evidence is at least
   # `release_ratio` of the trigger levels; it is released (redirect undone, its decoys

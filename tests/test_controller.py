@@ -134,7 +134,7 @@ def test_release_after_quiet_period_and_cooldown(cfg):
     ctl = MapeKController(cfg, manager=mgr)
     ctl.set_enabled(True)
     ctl.set_detection_policy(None, {"quiet_seconds": 10, "reengage_cooldown_seconds": 600})
-    _flows("WebAttack", 5, 0.99)
+    _flows("WebAttack", ctl.class_policy("WebAttack")["min_flows"], 0.99)
     ctl.run_cycle()
     assert ctl.engagements()[0]["state"] == "active"
     with db.connect(DBP[0]) as c:          # pretend the last evidence was long ago
@@ -142,7 +142,7 @@ def test_release_after_quiet_period_and_cooldown(cfg):
     ctl.run_cycle()
     e = ctl.engagements()[0]
     assert e["state"] == "released" and mgr.deployed == {}     # decoys torn down
-    _flows("WebAttack", 5, 0.99)                                # fresh evidence inside the cooldown
+    _flows("WebAttack", ctl.class_policy("WebAttack")["min_flows"], 0.99)                                # fresh evidence inside the cooldown
     ctl.run_cycle()
     assert len(ctl.engagements()) == 1 and mgr.deployed == {}
     with db.connect(DBP[0]) as c:
