@@ -495,6 +495,8 @@ def detection_matrix(cfg=None, max_runs: int = 200, model: str | None = "live") 
     from live.predictor import active_model_dir
     live_name = active_model_dir(cfg).name
     only = live_name if model == "live" else model
+    # a retrain keeps the model's name, so "the live model" also means "since it was trained"
+    since = _model_trained_at(active_model_dir(cfg)) if model == "live" else None
     cells: dict[tuple[str, str], dict[str, Any]] = {}
     with db.connect(db.db_path(cfg)) as c:
         row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
@@ -513,8 +515,8 @@ def detection_matrix(cfg=None, max_runs: int = 200, model: str | None = "live") 
                     "AND (src_ip = ? OR dst_ip = ?) AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 "
                     # the benign requests an attack pod mixes in are not the attack
                     "AND COALESCE(src_port, 0) NOT BETWEEN ? AND ? AND COALESCE(dst_port, 0) NOT BETWEEN ? AND ? "
-                    "AND (? IS NULL OR model = ?)",
-                    (exp or "BENIGN", sid, sc, ip, ip, lo, hi, lo, hi, only, only)).fetchone()
+                    "AND (? IS NULL OR model = ?) AND (? IS NULL OR detected_at >= ?)",
+                    (exp or "BENIGN", sid, sc, ip, ip, lo, hi, lo, hi, only, only, since, since)).fetchone()
                 if not r["n"]:
                     continue
                 tgt = (j.get("target_label") or j.get("target") or "?").split(".")[0].split(":")[0]
@@ -535,7 +537,19 @@ def detection_matrix(cfg=None, max_runs: int = 200, model: str | None = "live") 
                     "detection_rate": cell["detected"] / n if n else None,
                     "attack_rate": cell["malicious"] / n if n else None})
     out.sort(key=lambda x: (x["scenario"], x["target"]))
-    return {"cells": out, "model_in_use": live_name, "filtered_to": only}
+    return {"cells": out, "model_in_use": live_name, "filtered_to": only, "model_trained_at": since}
+
+
+def _model_trained_at(model_dir) -> str | None:
+    """When the model in `model_dir` was trained (metrics.json, else the file's time)."""
+    try:
+        t = json.loads((model_dir / "metrics.json").read_text()).get("trained_at")
+        if t:
+            return t
+    except Exception:  # noqa: BLE001
+        pass
+    f = model_dir / "best_model.joblib"
+    return datetime.fromtimestamp(f.stat().st_mtime, timezone.utc).isoformat() if f.is_file() else None
 
 
 def _severity(conf: float | None, malicious: bool, th: dict[str, Any]) -> str:

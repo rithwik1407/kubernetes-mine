@@ -77,3 +77,26 @@ def test_auto_retrain_starts_after_enough_attack_jobs(cfg, monkeypatch):
     assert len(started) == 1 and "3 new labelled attack Jobs" in started[0]
     with db.connect(db.db_path(cfg)) as c:
         assert db.kv_get(c, "retrain_new_attack_jobs", "") == "0"
+
+
+def test_matrix_counts_only_flows_since_the_live_model_was_trained(cfg, monkeypatch, tmp_path):
+    import json
+    from live import predictor
+    md = tmp_path / "k8s-lab-local"
+    md.mkdir()
+    (md / "best_model.joblib").write_bytes(b"x")
+    trained = datetime.now(timezone.utc) - timedelta(minutes=5)
+    (md / "metrics.json").write_text(json.dumps({"trained_at": trained.isoformat()}))
+    monkeypatch.setattr(predictor, "active_model_dir", lambda c=None: md)
+    before, after = (trained - timedelta(minutes=1)).isoformat(), datetime.now(timezone.utc).isoformat()
+    with db.connect(db.db_path(cfg)) as c:
+        for when, cls, n in ((before, "WebAttack", 6), (after, "BENIGN", 4)):   # same name, older version
+            for _ in range(n):
+                db.insert_row(c, "detections", predicted_class=cls, confidence=0.9, is_malicious=int(cls != "BENIGN"),
+                              source="live", detected_at=when, session_id=7, src_ip="10.42.0.50", dst_ip="10.42.0.5",
+                              src_port=40000, dst_port=1880, lab_scenario="web_recon", model="k8s-lab-local")
+        db.kv_set(c, "pipeline_runs", json.dumps([{"id": "r", "started_at": before, "session_id": 7, "jobs": [
+            {"scenario": "web_recon", "pod_ip": "10.42.0.50", "expect_class": "BENIGN", "target_label": "nodered"}]}]))
+    m = queries.detection_matrix(cfg)
+    assert m["cells"][0]["flows"] == 4 and m["cells"][0]["detection_rate"] == 1.0
+    assert queries.detection_matrix(cfg, model=None)["cells"][0]["flows"] == 10
