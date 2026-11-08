@@ -207,9 +207,12 @@ def test_benign_never_deploys(cfg):
 
 
 def test_flow_burst_triggers_decoy_by_port(cfg):
+    """A burst acts when the model also classified some of the source's flows as an attack
+    (4 flows: below the ML policy's 10, above the burst rule's 3)."""
     mgr = FakeManager()
     ctl = MapeKController(cfg, manager=mgr)
     ctl.set_enabled(True)
+    _flows("BruteForce", 4, 0.7, src="10.42.0.7")
     with db.connect(cfg["paths"]["database"]) as c:
         db.insert_row(c, "behavior_alerts", src_ip="10.42.0.7", dst_ip="10.43.0.5", dst_port=1880,
                       protocol=6, flows=40, rate_per_s=4.0, window_s=10.0, ml_malicious_flows=0,
@@ -296,10 +299,36 @@ def test_quarantine_label_waits_for_the_generator_to_confirm_the_redirect(cfg):
     ctl.run_cycle()                       # not confirmed yet, inside the timeout: no label
     assert red.calls == [("annotate", to)]
     red.ack = True
-    ctl.run_cycle()                       # the generator logged the redirect -> label
-    assert red.calls[-1] == ("10.42.0.9", to)
+    ctl.run_cycle()                       # the generator confirmed: redirected, NOT quarantined
+    assert red.calls == [("annotate", to)]
     rd = ctl.engagements()[0]["redirect"]
-    assert rd["applied"] and rd["acknowledged"] and "confirmed" in rd["reason"]
+    assert rd["applied"] and rd["acknowledged"] and rd["quarantined"] is False and "confirmed" in rd["reason"]
+    assert "benign requests keep reaching the real target" in rd["reason"]
+
+
+def test_redirect_without_confirmation_is_quarantined(cfg):
+    cfg["deception"]["redirect"]["ack_timeout_seconds"] = 0
+    mgr, red = FakeManager(), AckRedirector()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.redirector = red
+    ctl.set_enabled(True)
+    _flows("PortScan", 12, 0.97)
+    ctl.run_cycle(); ctl.run_cycle(); ctl.run_cycle()
+    to = "decoy-web-portal.ids-deception.svc.cluster.local:80"
+    assert red.calls[-1] == ("10.42.0.9", to)          # quarantine label applied
+    assert "quarantined anyway" in ctl.engagements()[0]["redirect"]["reason"]
+
+
+def test_quarantine_always_mode_labels_a_confirmed_pod(cfg):
+    cfg["deception"]["redirect"]["quarantine"] = "always"
+    mgr, red = FakeManager(), AckRedirector()
+    red.ack = True
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.redirector = red
+    ctl.set_enabled(True)
+    _flows("PortScan", 12, 0.97)
+    ctl.run_cycle(); ctl.run_cycle(); ctl.run_cycle()
+    assert red.calls[-1] == ("10.42.0.9", "decoy-web-portal.ids-deception.svc.cluster.local:80")
 
 
 def test_orphan_decoys_are_removed_after_the_grace_period(cfg):
@@ -349,3 +378,42 @@ def test_ml_and_behaviour_triggers_in_one_cycle_plan_one_decoy(cfg):
     deploys = [a["name"] for a in acts if a["action"] == "deploy"]
     assert len(deploys) == 1
     assert [a["action"] for a in acts if a["trigger"] == "behavior"] == ["refresh"]
+
+
+def test_flow_burst_the_model_calls_benign_is_not_redirected(cfg):
+    """web_recon: a crawler forms a flow burst, but the model scores its flows BENIGN.
+    Only attack traffic is redirected, so no decoy and no engagement."""
+    mgr = FakeManager()
+    ctl = MapeKController(cfg, manager=mgr)
+    ctl.set_enabled(True)
+    with db.connect(DBP[0]) as c:
+        db.insert_row(c, "behavior_alerts", src_ip="10.42.0.8", dst_ip="10.43.0.5", dst_port=1880,
+                      protocol=6, flows=60, rate_per_s=6.0, window_s=10.0, ml_malicious_flows=0,
+                      ml_classes="{}", detected_at=_now())
+    ctl.run_cycle()
+    assert mgr.deployed == {}
+    assert ctl.engagements() == []
+    with db.connect(DBP[0]) as c:
+        r = c.execute("SELECT action, reason FROM decisions WHERE src_ip = '10.42.0.8'").fetchone()
+    assert r["action"] == "monitor" and "benign traffic is not redirected" in r["reason"]
+    from live.queries import _not_engaged_category
+    assert _not_engaged_category(r["action"], r["reason"]) == "benign_model"
+
+
+def test_reused_decoy_counts_as_the_engagements_decoy(cfg):
+    """Sandbox engagement #71: the ML trigger could not deploy (cooldown) and reused a
+    running decoy; a flow burst in the same cycle then linked a second decoy."""
+    from live import db as _db
+    ctl = MapeKController(cfg, manager=FakeManager())
+    with _db.connect(DBP[0]) as c:
+        for name, prof in (("decoy-influxdb-vm", "influxdb"), ("decoy-web-portal-vm", "web-portal")):
+            _db.insert_row(c, "decoys", name=name, profile=prof, namespace="ids-deception", status="active",
+                           created_at=_now(), port=80)
+        eid = _db.insert_row(c, "engagements", src_ip="10.42.0.18", state="active", started_at=_now(),
+                             last_evidence_at=_now(), node="vm", decoys="[]", redirect="{}")
+        base = {"actionable": True, "assessment": "high", "src_ip": "10.42.0.18", "engagement_id": eid,
+                "target_node": "vm", "evidence_count": 13, "reason": "r"}
+        acts = ctl.plan(c, [{**base, "trigger": "ml", "attack_class": "BruteForce"},
+                            {**base, "trigger": "behavior", "attack_class": "Reconnaissance (flow burst)", "target_port": 1880}])
+    names = {a["name"] for a in acts if a["action"] in ("deploy", "refresh", "reuse", "scale")}
+    assert len(names) == 1, [(a["trigger"], a["action"], a.get("name")) for a in acts]

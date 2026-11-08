@@ -43,6 +43,14 @@ behavior:
   sweep_min_ports: 10
   protocols: [6]                     # TCP
   ignore_sources: []
+  # Only attack traffic is redirected: a burst or sweep acts only when the model also
+  # classified at least ml_attack_min_flows (and ml_attack_min_share) of the source's
+  # flows as an attack within ml_attack_window_seconds. A benign crawler (web_recon) is monitored, never engaged.
+  require_ml_attack: true
+  ml_attack_min_flows: 3
+  ml_attack_min_share: 0.2           # and at least this share of its flows (a crawler with a few
+                                     # odd-looking requests is not an attacker)
+  ml_attack_window_seconds: 120
 
 capture:
   interface: cni0                    # K3s pod bridge (Ethernet framing; see friend's notes)
@@ -110,6 +118,11 @@ traffic_lab:
     influxdb: {host: influxdb.target-apps.svc.cluster.local, port: 8086}
   job_deadline_seconds: 300          # count-based runs; a "Run for N minutes" Job gets N min + job_start_margin_seconds
   job_start_margin_seconds: 120
+  # Attack runs also send one ordinary request to the real target every N s, from a
+  # source port in benign_src_ports (outside the ephemeral range), so training can label
+  # those flows BENIGN and deception can be checked: they must keep reaching the target.
+  benign_mix_seconds: 3
+  benign_src_ports: [20000, 20999]
   # default_target is a key of `targets`; env is passed to the generator pod.
   # expect_class is what the scenario is meant to resemble, not a promise: the
   # dashboard compares it with what the model actually predicted for the run.
@@ -199,6 +212,11 @@ deception:
     # the target before it knows where the decoy is.
     wait_for_ack: true
     ack_timeout_seconds: 20
+    # on_timeout: a pod that confirmed the redirect is NOT quarantined, so its benign
+    #   requests still reach the real target (only attack connections go to the decoy);
+    #   a pod that did not confirm within ack_timeout_seconds is quarantined.
+    # always: quarantine every redirected pod (blocks its benign traffic as well).
+    quarantine: on_timeout
   engagement:
     window_seconds: 300
     scale_up_interactions: 20

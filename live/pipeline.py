@@ -9,6 +9,7 @@ scored, detections by class and flow bursts since the run started.
 from __future__ import annotations
 
 import json
+from collections import Counter
 import threading
 import time
 from datetime import datetime, timedelta, timezone
@@ -339,11 +340,20 @@ def _breakdown(conn, job: dict[str, Any], since: str, until: str | None) -> dict
         return {"pod_ip": None, "flows": 0, "by_class": {}, "accuracy": None,
                 "note": "generator pod IP unknown (pod not seen yet or already deleted)"}
     until = until or "9999"
+    from live.trafficlab import benign_src_ports
+    lo, hi = benign_src_ports()
+    mixed = "(COALESCE(src_port, 0) BETWEEN ? AND ? OR COALESCE(dst_port, 0) BETWEEN ? AND ?)"
     rows = conn.execute(
         "SELECT predicted_class, COUNT(*) n, SUM(is_malicious) mal, AVG(confidence) conf, "
         "SUM(CASE WHEN allowlisted IS NOT NULL THEN 1 ELSE 0 END) allow FROM detections "
         "WHERE simulated = 0 AND (src_ip = ? OR dst_ip = ?) AND detected_at >= ? AND detected_at <= ? "
-        "GROUP BY predicted_class", (ip, ip, since, until)).fetchall()
+        f"AND NOT {mixed} GROUP BY predicted_class", (ip, ip, since, until, lo, hi, lo, hi)).fetchall()
+    # the benign requests mixed into the attack: they should be scored BENIGN and keep going
+    # to the real target (never to the decoy)
+    bm = conn.execute(
+        "SELECT predicted_class, dst_ip, COUNT(*) n FROM detections WHERE simulated = 0 AND src_ip = ? "
+        f"AND detected_at >= ? AND detected_at <= ? AND {mixed} GROUP BY 1, 2",
+        (ip, since, until, lo, hi, lo, hi)).fetchall()
     by = {r["predicted_class"]: r["n"] for r in rows}
     total = sum(by.values())
     exp = job.get("expect_class")
@@ -353,7 +363,10 @@ def _breakdown(conn, job: dict[str, Any], since: str, until: str | None) -> dict
             "matched": by.get(exp, 0) if exp else None,
             "accuracy": round(by.get(exp, 0) / total, 4) if exp and total else None,
             "mean_confidence": {r["predicted_class"]: round(r["conf"], 3) for r in rows},
-            "behaviour_alerts": {a: n for a, n in alerts}}
+            "behaviour_alerts": {a: n for a, n in alerts},
+            "benign_mix": {"flows": sum(r["n"] for r in bm),
+                           "by_class": dict(Counter(r["predicted_class"] for r in bm for _ in range(r["n"]))),
+                           "by_dst": dict(Counter(r["dst_ip"] for r in bm for _ in range(r["n"])))} if bm else None}
 
 
 def _outcome(pj: dict[str, Any]) -> dict[str, Any]:

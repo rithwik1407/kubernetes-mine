@@ -6,8 +6,10 @@ that this machine's CICFlowMeter produces. Before it overwrites the live model, 
 current best_model.joblib / metrics.json are copied to <model_dir>/history/<time>/,
 so no trained model is ever lost.
 
-Held-out test: for every attack scenario with at least two labelled sessions, the
-newest session is held out; the metrics in metrics.json come from those sessions only.
+Held-out test: per class (scripts/train_lab_model.py split_per_class), so every class
+with data is in the test set. The new model replaces the live one only if no class's
+recall drops and at least one improves on the same held-out flows; otherwise it is
+saved to <model_dir>/candidate/ and the live model stays.
 """
 from __future__ import annotations
 
@@ -63,8 +65,10 @@ def start(cfg: dict[str, Any] | None = None, on_done=None) -> dict[str, Any]:
         attack = {s for v in sessions.values() for s in v} & {"port_scan", "brute_force", "web_attack", "slow_dos"}
         if not attack:
             raise RuntimeError("no labelled attack runs yet: run the attack scenarios from the Traffic lab first")
-        test = choose_test_sessions(sessions)
+        test: list[int] = []           # the script holds out per class (every class is tested)
         model_dir = get_path("local_model_dir", cfg) if cfg["paths"].get("local_model_dir") else get_path("model_dir", cfg)
+        # the model that is live now: the new one replaces it only if per-class recall improves
+        current = model_dir if (model_dir / "best_model.joblib").is_file() else get_path("model_dir", cfg)
         _STATE.update(state="running", started_at=datetime.now(timezone.utc).isoformat(), finished_at=None,
                       log="", error=None, test_sessions=test, backup=None, sessions=len(sessions),
                       scenarios=sorted({s for v in sessions.values() for s in v}))
@@ -80,21 +84,31 @@ def start(cfg: dict[str, Any] | None = None, on_done=None) -> dict[str, Any]:
                         shutil.copy2(model_dir / f, backup / f)
             argv = [sys.executable, str(SCRIPT), "--out", str(model_dir),
                     "--sample-out", str(model_dir / "sample_test_mix.csv")]
-            if test:
-                argv += ["--test-sessions", ",".join(str(int(s)) for s in test)]
+            argv += ["--compare", str(current)]
+            cic = repo_path("data/cic-ids2017/merged.csv")
+            if cic.is_file():               # add CIC-IDS2017 rows of the same classes to training
+                argv += ["--cic-csv", str(cic)]
             p = subprocess.run(argv, capture_output=True, text=True, timeout=1800, cwd=str(repo_path(".")))
             text = (p.stdout + p.stderr)[-6000:]
             with _LOCK:
                 _STATE.update(log=text, backup=str(backup) if backup else None)
             if p.returncode != 0:
                 raise RuntimeError(f"training exited with {p.returncode}")
-            metrics = json.loads((model_dir / "metrics.json").read_text())
+            cand = model_dir / "candidate" / "metrics.json"
+            live_m = model_dir / "metrics.json"
+            mp = cand if cand.is_file() and (not live_m.is_file() or cand.stat().st_mtime > live_m.stat().st_mtime) else live_m
+            metrics = json.loads(mp.read_text())
             res = (metrics.get("models") or {}).get("RandomForest") or {}
+            prev = ((metrics.get("previous_model") or {}).get("on_same_test") or {})
             with _LOCK:
                 _STATE.update(state="done", result={k: res.get(k) for k in ("accuracy", "macro_f1", "attack_detection_rate",
                                                                              "false_alarm_rate", "per_class")},
-                              train_counts=(metrics.get("split_counts") or {}).get("train"))
-            if on_done:
+                              previous={k: prev.get(k) for k in ("macro_f1", "per_class")} if prev else None,
+                              replaced=bool(metrics.get("replaced", True)), decision=metrics.get("decision"),
+                              warnings=metrics.get("warnings") or [],
+                              train_counts=(metrics.get("split_counts") or {}).get("train"),
+                              test_counts=(metrics.get("split_counts") or {}).get("test"))
+            if on_done and metrics.get("replaced", True):
                 on_done()
             log.info("lab model retrained (test sessions %s)", test)
         except Exception as e:  # noqa: BLE001

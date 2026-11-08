@@ -192,9 +192,17 @@ def resolve_target(scenario: str, target: str | None, cfg: dict[str, Any], core=
 # --- jobs ------------------------------------------------------------------------------
 # Generator parameters the dashboard may set, each mapped to one env var of the generator
 # and validated here (type, range, pattern): nothing else from a request reaches the pod.
+def benign_src_ports(cfg: dict[str, Any] | None = None) -> tuple[int, int]:
+    """Source ports of the benign requests mixed into attack runs (labelled BENIGN in training)."""
+    r = ((cfg or load_config())["traffic_lab"].get("benign_src_ports") or [20000, 20999])
+    return int(r[0]), int(r[1])
+
+
 GEN_PARAMS: dict[str, dict[str, Any]] = {
     "concurrency":  {"env": "CONCURRENCY", "type": int, "min": 1, "max": 16, "modes": ["port_scan", "brute_force", "web_attack"],
                      "help": "parallel workers (rate is about concurrency / delay per second)"},
+    "benign_mix_s": {"env": "BENIGN_MIX_S", "type": float, "min": 0, "max": 60, "modes": ["port_scan", "brute_force", "web_attack", "slow_dos"],
+                     "help": "one ordinary request to the real target every N s during the attack (0 = off); never redirected to the decoy"},
     "minutes":      {"env": "RUN_SECONDS", "type": float, "min": 0.5, "max": 60, "modes": None,
                      "help": "run for this many minutes: the scenario repeats at its normal rate until the time is up"},
     "target_port":  {"env": None, "type": int, "min": 1, "max": 65535, "modes": ["port_scan", "brute_force", "web_attack", "slow_dos", "web_recon"],
@@ -281,6 +289,10 @@ def build_job(scenario: str, cfg: dict[str, Any], target: str | None = None,
         # the deception controller's redirect (live/redirect.py) arrives as a pod annotation
         {"name": "REDIRECT_FILE", "value": "/etc/podinfo/annotations"},
     ]
+    if mode in ("port_scan", "brute_force", "web_attack", "slow_dos"):
+        lo, hi = benign_src_ports(cfg)
+        env += [{"name": "BENIGN_MIX_S", "value": str(float(tl.get("benign_mix_seconds", 3)))},
+                {"name": "BENIGN_SRC_PORT_LO", "value": str(lo)}, {"name": "BENIGN_SRC_PORT_HI", "value": str(hi)}]
     env += [{"name": str(k), "value": str(v)} for k, v in (sc.get("env") or {}).items()]
     over = {GEN_PARAMS[k]["env"]: str(v) for k, v in params.items() if GEN_PARAMS[k]["env"] and k != "minutes"}
     if run_s:
@@ -462,6 +474,7 @@ def summarize_log(text: str) -> dict[str, Any]:
     statuses: Counter = Counter()
     errors: Counter = Counter()
     ok = err = lines = 0
+    benign = {"answered": 0, "failed": 0, "while_redirected": 0}
     first = last = None
     for line in text.splitlines():
         try:
@@ -475,6 +488,10 @@ def summarize_log(text: str) -> dict[str, Any]:
         last = rec.get("ts")
         a = rec["action"]
         actions[a] += 1
+        if a == "benign_mix":                # benign requests mixed into an attack run
+            benign["failed" if rec.get("error") else "answered"] += 1
+            benign["while_redirected"] += 1 if rec.get("redirected") and not rec.get("error") else 0
+            continue
         if a in ("start", "done", "interrupted", "slow_established", "budget_exhausted", "run_complete", "redirected"):
             continue
         if rec.get("error"):
@@ -487,7 +504,7 @@ def summarize_log(text: str) -> dict[str, Any]:
     done = actions.get("done", 0) > 0
     return {"lines": lines, "ok": ok, "errors": err, "actions": dict(actions), "http_status": dict(statuses),
             "error_types": dict(errors), "finished": done, "first_ts": first, "last_ts": last,
-            "verified": ok > 0}
+            "verified": ok > 0, "benign_mix": benign if sum(benign.values()) else None}
 
 
 def job_detail(name: str, cfg: dict[str, Any] | None = None, tail: int = 2000) -> dict[str, Any]:

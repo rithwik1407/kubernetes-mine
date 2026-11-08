@@ -267,7 +267,30 @@ class MapeKController:
                 "evidence": {"behavior_alert_ids": [r["id"] for r in rows],
                              "ml_classes": json.loads(a["ml_classes"] or "{}")},
             })
-        return out
+        return [self._require_ml_attack(c, x) for x in out]
+
+    def _require_ml_attack(self, c, a: dict[str, Any]) -> dict[str, Any]:
+        """Only traffic the model classifies as an attack is redirected. A flow burst or a
+        port sweep whose flows the model scores BENIGN (web_recon: a crawler) is recorded
+        and monitored, never engaged."""
+        b = self.cfg.get("behavior") or {}
+        if a.get("trigger") != "behavior" or not a.get("actionable") or not b.get("require_ml_attack", True):
+            return a
+        need = int(b.get("ml_attack_min_flows", 3))
+        share_need = float(b.get("ml_attack_min_share", 0.2))
+        win = int(b.get("ml_attack_window_seconds", 120))
+        total, n = c.execute(
+            "SELECT COUNT(*), COALESCE(SUM(is_malicious), 0) FROM detections WHERE src_ip = ? AND simulated = 0 "
+            "AND detected_at >= ? AND COALESCE(dst_port, 0) != 53",
+            (a["src_ip"], iso(now_utc() - timedelta(seconds=win)))).fetchone()
+        share = n / total if total else 0.0
+        a = {**a, "evidence": {**(a.get("evidence") or {}), "ml_attack_flows": int(n), "flows": int(total),
+                               "ml_attack_share": round(share, 4)}}
+        got = f"the model classified {n} of {total} flow(s) of {a['src_ip']} ({share:.0%}) as an attack in {win}s"
+        if n >= need and share >= share_need:
+            return {**a, "reason": a["reason"] + "; " + got}
+        return {**a, "actionable": False, "assessment": "benign_by_model",
+                "reason": a["reason"] + f"; but {got} (needs {need} and {share_need:.0%}): benign traffic is not redirected"}
 
     def _assess_aggregate(self, trigger, src, cls, n, mean, pol, evidence, simulated) -> dict[str, Any]:
         """Per-class aggregation: N confident flows from one source within T seconds, mean confidence >= X."""
@@ -433,7 +456,18 @@ class MapeKController:
                         continue
                     note = (f"; the generator confirmed the redirect {waited:.0f}s after it was sent" if ack else
                             f"; no confirmation from the generator within {limit:.0f}s, quarantined anyway")
-                    new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None)
+                    mode = str(self.cfg["deception"].get("redirect", {}).get("quarantine", "on_timeout"))
+                    if ack and mode != "always":
+                        # Only the attack is redirected: the generator sends its attack connections
+                        # to the decoy and its benign requests to the real target. The quarantine
+                        # label would block those benign requests too, so it is kept for a pod that
+                        # never confirmed (it may not follow the redirect).
+                        new = {"applied": True, "quarantined": False, "to": to, "pod": rd["pod"],
+                               "namespace": rd["namespace"],
+                               "reason": f"attack connections of {rd['namespace']}/{rd['pod']} go to {to}; "
+                                         "its benign requests keep reaching the real target (no quarantine label)"}
+                    else:
+                        new = self.redirector.quarantine(e["src_ip"], self.cfg, redirect_to=to, only=only or None)
                     new["annotated_at"] = rd["annotated_at"]
                     new["acknowledged"] = bool(ack)
             else:
@@ -630,9 +664,15 @@ class MapeKController:
                                     "reason": a["reason"] + f"; policy {a['attack_class']} -> {profile}"})
                     active_count += 1
                 planned.add(name)
-                if eid:
-                    by_eng.setdefault(eid, []).append(name)
+                if eid and actions and actions[-1].get("name") == name \
+                        and actions[-1]["action"] in ("deploy", "refresh", "scale"):
+                    by_eng.setdefault(eid, []).append(name)    # suppressed profiles are not its decoy
             self._ensure_a_decoy(c, a, actions, decoys)
+            if eid:                         # a reused running decoy counts as the engagement's decoy too
+                for x in actions:
+                    if x.get("engagement_id") == eid and x["action"] == "reuse" and x.get("name") \
+                            and x["name"] not in by_eng.get(eid, []):
+                        by_eng.setdefault(eid, []).append(x["name"])
         return actions
 
     def _ensure_a_decoy(self, c, a: dict[str, Any], actions: list[dict[str, Any]], decoys: dict[str, dict]) -> None:

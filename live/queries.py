@@ -351,6 +351,7 @@ NOT_ENGAGED_REASONS = [
     # (category, label, explanation): matched in order against the controller's reason text
     ("disabled", "Deception off", "automatic deception was disabled, so nothing was acted on"),
     ("allowlisted", "Control plane / allowlisted", "the source is the API server, kubelet, node bridge or kube-system, which is never acted on"),
+    ("benign_model", "Benign by model", "a flow burst or port sweep, but the model classified the flows BENIGN; only attack traffic is redirected"),
     ("decoy", "Decoy traffic", "the source is a decoy pod itself"),
     ("reply", "Reply traffic", "the source only answers a lab attack pod (a target replying), so it is not an attacker"),
     ("cooldown", "Cooldown", "the source was released recently and may not re-engage until the cooldown ends"),
@@ -367,6 +368,8 @@ def _not_engaged_category(action: str | None, reason: str | None) -> str:
         return "disabled"
     if "allowlist" in r or "control-plane" in r or "control plane" in r or "kube-system" in r:
         return "allowlisted"
+    if "benign traffic is not redirected" in r:
+        return "benign_model"
     if "decoy pod" in r or "is a decoy" in r:
         return "decoy"
     if "reply traffic" in r or "answering traffic-lab pod" in r:
@@ -490,6 +493,8 @@ def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
     with db.connect(db.db_path(cfg)) as c:
         row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
         runs = json.loads(row[0]) if row else []
+        from live.trafficlab import benign_src_ports
+        lo, hi = benign_src_ports(cfg)
         for run in runs[:max_runs]:
             sid = run.get("session_id")
             for j in run.get("jobs", []):
@@ -499,8 +504,10 @@ def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
                 r = c.execute(
                     "SELECT COUNT(*) n, SUM(predicted_class = ?) hit, SUM(predicted_class != 'BENIGN') mal, "
                     "GROUP_CONCAT(DISTINCT model) models FROM detections WHERE session_id = ? AND lab_scenario = ? "
-                    "AND (src_ip = ? OR dst_ip = ?) AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53",
-                    (exp or "BENIGN", sid, sc, ip, ip)).fetchone()
+                    "AND (src_ip = ? OR dst_ip = ?) AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 "
+                    # the benign requests an attack pod mixes in are not the attack
+                    "AND COALESCE(src_port, 0) NOT BETWEEN ? AND ? AND COALESCE(dst_port, 0) NOT BETWEEN ? AND ?",
+                    (exp or "BENIGN", sid, sc, ip, ip, lo, hi, lo, hi)).fetchone()
                 if not r["n"]:
                     continue
                 tgt = (j.get("target_label") or j.get("target") or "?").split(".")[0].split(":")[0]

@@ -69,7 +69,18 @@ _T0 = time.monotonic()
 # pod that started late (image pull, busy node) still stops before Kubernetes kills it.
 JOB_DEADLINE_EPOCH = float(os.environ.get("JOB_DEADLINE_EPOCH", "0") or 0)
 _COUNTS = {"ok": 0, "errors": 0}
-_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected",
+# Benign requests mixed into an attack run (an attacked app keeps its normal users, and the
+# attacker's pod may browse normally too). One ordinary GET to the attacked app every
+# BENIGN_MIX_S seconds, from a source port in [BENIGN_SRC_PORT_LO, BENIGN_SRC_PORT_HI].
+# That range is below the Linux ephemeral range (32768-60999), so no attack connection
+# uses it and every flow's true label is known (training labels these flows BENIGN). They are never
+# sent to the decoy: only the attack is redirected. 0 = off.
+BENIGN_MIX_S = float(os.environ.get("BENIGN_MIX_S", "0") or 0)
+BENIGN_SRC_PORT_LO = int(os.environ.get("BENIGN_SRC_PORT_LO", "20000"))
+BENIGN_SRC_PORT_HI = int(os.environ.get("BENIGN_SRC_PORT_HI", "20999"))
+BENIGN_PATHS = {1880: "/", 3000: "/api/health", 8086: "/health"}
+_BENIGN = {"ok": 0, "errors": 0, "to_decoy": 0}
+_NOT_COUNTED = {"start", "done", "interrupted", "slow_established", "budget_exhausted", "fatal", "redirected", "benign_mix",
                 "run_complete"}
 # Deception redirect. The pod's own annotations are mounted here through the downward
 # API (Kubernetes refreshes the file within seconds of a change). When the deception
@@ -403,6 +414,31 @@ def run_decoy_probe() -> None:
     emit(action="done", scenario="decoy_probe")
 
 
+def benign_mix(stop: threading.Event) -> None:
+    """Ordinary GETs to the REAL target (never aimed at the decoy) from a fixed source-port
+    range, while the attack runs."""
+    import http.client
+    host, port = host_port(TARGET, 1880)
+    path = BENIGN_PATHS.get(port, "/")
+    span = max(1, BENIGN_SRC_PORT_HI - BENIGN_SRC_PORT_LO + 1)
+    i = 0
+    while not stop.wait(BENIGN_MIX_S):
+        src = BENIGN_SRC_PORT_LO + (i % span)
+        i += 1
+        conn = http.client.HTTPConnection(host, port, timeout=TIMEOUT, source_address=("", src))
+        try:
+            conn.request("GET", path, headers={"User-Agent": "ids-lab/1.0 (benign)", "Connection": "close"})
+            st = conn.getresponse().status
+            _BENIGN["ok"] += 1
+            emit(action="benign_mix", host=host, port=port, path=path, src_port=src, status=st,
+                 redirected=bool(redirect_target()))
+        except Exception as e:  # noqa: BLE001
+            _BENIGN["errors"] += 1
+            emit(action="benign_mix", host=host, port=port, path=path, src_port=src, error=type(e).__name__)
+        finally:
+            conn.close()
+
+
 RUNNERS = {
     "benign": run_benign, "web_recon": run_web_recon, "port_scan": run_port_scan,
     "slow_dos": run_slow_dos, "brute_force": run_brute_force, "web_attack": run_web_attack,
@@ -414,6 +450,9 @@ def main() -> None:
     runner = RUNNERS.get(MODE)
     if runner is None:
         sys.exit(f"unknown MODE {MODE!r}; one of {sorted(RUNNERS)}")
+    stop = threading.Event()
+    if BENIGN_MIX_S > 0 and MODE in ("port_scan", "slow_dos", "brute_force", "web_attack"):
+        threading.Thread(target=benign_mix, args=(stop,), daemon=True).start()
     try:
         if RUN_SECONDS > 0:
             passes = 0
@@ -422,10 +461,13 @@ def main() -> None:
                 runner()
                 time.sleep(1)                  # never spin when a pass ends at once (target down)
             emit(action="run_complete", scenario=MODE, passes=passes, seconds=round(time.monotonic() - _T0),
-                 answered=_COUNTS["ok"], failed=_COUNTS["errors"])
+                 answered=_COUNTS["ok"], failed=_COUNTS["errors"],
+                 benign_answered=_BENIGN["ok"], benign_failed=_BENIGN["errors"])
         else:
             runner()
+        stop.set()
     except KeyboardInterrupt:
+        stop.set()
         emit(action="interrupted", scenario=MODE)
         return
     # Partial failures are normal for attack traffic (closed ports, 4xx), so the Job only

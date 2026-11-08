@@ -410,7 +410,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
   <section class="page" id="p-model" data-title="Model & dataset" data-sub="Read from the saved model artifacts; nothing here is recomputed or estimated">
     <div class="grid kpis" id="mdKpis"><div class="loading">Loading model…</div></div>
     <div class="grid two" style="margin-top:14px">
-      <div class="card"><h2>Per-class test metrics</h2><p class="hint">Held-out CIC-IDS2017 test split</p><div id="mdPerClass"></div></div>
+      <div class="card"><h2>Per-class test metrics</h2><p class="hint" id="mdPerClassHint">Held-out test split</p><div id="mdPerClass"></div></div>
       <div class="card"><h2>Class distribution</h2><p class="hint">Training flows per class after cleaning and de-duplication (log scale)</p><div id="mdDist" class="chart"></div></div>
     </div>
     <div class="grid two" style="margin-top:14px">
@@ -697,11 +697,12 @@ async function loadChrome() {
 /* ---------------- A. Overview ---------------- */
 function drawActivity(act) {
   const bs = act.buckets || [], bucket = act.bucket_seconds;
-  $("ovActHint").textContent = `Scored flows per ${bucket} s interval, last ${act.minutes} min. Shaded: capture off. Markers: malicious detections and behaviour alerts (hover for details).`;
+  $("ovActHint").textContent = `Scored flows per ${bucket} s interval, last ${act.minutes} min. Shaded: capture off. Markers: malicious detections and behaviour alerts. Scroll to zoom, drag to pan, double-click to reset.`;
   const anyData = bs.some(b => b.benign || b.malicious) || (act.alerts || []).length;
   if (!anyData && !bs.some(b => b.capture_on)) { plot("ovActivity", null, null, `No capture in the last ${act.minutes} minutes`); return; }
   // bucket centre so a value sits in the middle of its interval
   const mid = b => new Date(new Date(b.t).getTime() + bucket * 500);
+  const hhmmss = t => new Date(t).toLocaleTimeString([], { hour12: false });
   const on = b => b.capture_on !== false;
   const x = bs.map(mid);
   const benign = bs.map(b => on(b) ? b.benign : null), mal = bs.map(b => on(b) ? b.malicious : null);
@@ -719,27 +720,36 @@ function drawActivity(act) {
   const bucketOf = t => { const k = Math.floor((new Date(t) - new Date(act.start)) / (bucket * 1000)); return bs[Math.max(0, Math.min(bs.length - 1, k))]; };
   const traces = [
     { type: "scatter", mode: "lines", name: "Benign flows", x, y: benign, connectgaps: false, line: { color: cssVar("--c-benign"), width: 2, shape: "spline", smoothing: 0.6 },
-      fill: "tozeroy", fillcolor: "rgba(111,110,105,.18)", hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} benign flows<extra></extra>" },
+      fill: "tozeroy", fillcolor: "rgba(111,110,105,.18)", hovertemplate: "%{y:,} benign flows<extra></extra>" },
     { type: "scatter", mode: "lines", name: "glow", showlegend: false, hoverinfo: "skip", x, y: mal, connectgaps: false,
       line: { color: cssVar("--critical"), width: 9, shape: "spline", smoothing: 0.6 }, opacity: 0.18 },
     { type: "scatter", mode: "lines", name: "Malicious flows (model)", x, y: mal, connectgaps: false, line: { color: cssVar("--critical"), width: 2, shape: "spline", smoothing: 0.6 },
-      hovertemplate: "%{x|%H:%M:%S}<br>%{y:,} malicious flows<extra></extra>" },
+      hovertemplate: "%{y:,} malicious flows<extra></extra>" },
     { type: "scatter", mode: "markers", name: "Malicious detection", x: ev.map(e => mid(bucketOf(e.t))), y: ev.map(e => (bucketOf(e.t) || {}).malicious || 0),
       marker: { color: cssVar("--critical"), size: 10, symbol: "diamond", line: { color: cssVar("--surface"), width: 2 } },
-      customdata: ev.map(e => [e.predicted_class, `${e.src_ip} → ${e.dst_ip}:${e.dst_port ?? ""}`, e.n, (+e.confidence).toFixed(2), new Date(e.t).toLocaleTimeString()]),
+      customdata: ev.map(e => [e.predicted_class, `${e.src_ip} → ${e.dst_ip}:${e.dst_port ?? ""}`, e.n, (+e.confidence).toFixed(2), hhmmss(e.t)]),
       hovertemplate: "<b>%{customdata[0]}</b> · %{customdata[4]}<br>%{customdata[1]}<br>%{customdata[2]} flow(s), max confidence %{customdata[3]}<extra></extra>" },
     { type: "scatter", mode: "markers", name: "Behaviour alert", x: al.map(a => mid(bucketOf(a.t))), y: al.map(() => ymax * 1.08),
       marker: { color: cssVar("--warning"), size: 9, symbol: "triangle-down", line: { color: cssVar("--surface"), width: 1.5 } },
-      customdata: al.map(a => [a.alert_type === "port_sweep" ? `Port sweep (${a.distinct_ports} ports)` : "Flow burst", `${a.src_ip} → ${a.dst_ip}${a.dst_port ? ":" + a.dst_port : ""}`, a.flows, new Date(a.t).toLocaleTimeString()]),
+      customdata: al.map(a => [a.alert_type === "port_sweep" ? `Port sweep (${a.distinct_ports} ports)` : "Flow burst", `${a.src_ip} → ${a.dst_ip}${a.dst_port ? ":" + a.dst_port : ""}`, a.flows, hhmmss(a.t)]),
       hovertemplate: "<b>%{customdata[0]}</b> · %{customdata[3]}<br>%{customdata[1]}<br>%{customdata[2]} flows<extra></extra>" },
     { type: "scatter", mode: "markers", name: "Capture off", x: [null], y: [null], marker: { symbol: "square", size: 12, color: cssVar("--surface-3") }, hoverinfo: "skip" },
   ];
+  // Interactive: wheel zoom and drag-to-pan on the time axis, a crosshair with one tooltip
+  // for every series at that time, and an eased transition when new buckets arrive.
+  // uirevision keeps the reader's zoom across refreshes until the time range is changed.
+  const el = $("ovActivity"), first = !el.classList.contains("js-plotly-plot") || el.dataset.rev !== String(act.minutes);
+  el.dataset.rev = String(act.minutes);
   plot("ovActivity", traces, {
     showlegend: true, legend: { orientation: "h", y: -0.2, x: 0, font: { size: 11, color: cssVar("--text-2") } },
-    margin: { l: 48, r: 12, t: 10, b: 64 }, shapes, annotations: ann, hovermode: "closest",
-    xaxis: Object.assign(layout().xaxis, { type: "date", range: [new Date(act.start), new Date(act.end)], tickformat: act.minutes <= 5 ? "%H:%M:%S" : "%H:%M", nticks: 7, showgrid: false }),
+    margin: { l: 48, r: 12, t: 10, b: 64 }, shapes, annotations: ann, hovermode: "x unified", dragmode: "pan",
+    hoverlabel: { bgcolor: cssVar("--surface-2"), bordercolor: cssVar("--border"), font: { color: cssVar("--text"), size: 12 } },
+    uirevision: "act-" + act.minutes,
+    transition: first ? { duration: 0 } : { duration: 600, easing: "cubic-in-out" },
+    xaxis: Object.assign(layout().xaxis, { type: "date", autorange: true, hoverformat: "%H:%M:%S", tickformat: act.minutes <= 5 ? "%H:%M:%S" : "%H:%M", nticks: 7, showgrid: false,
+      showspikes: true, spikemode: "across", spikesnap: "cursor", spikethickness: 1, spikedash: "dot", spikecolor: cssVar("--muted") }),
     yaxis: Object.assign(layout().yaxis, { title: { text: `flows / ${bucket} s`, font: { size: 11 } }, range: [0, ymax * 1.18], fixedrange: true }),
-  });
+  }, null, { scrollZoom: true, doubleClick: "reset", displayModeBar: false });
 }
 async function pageOverview(full) {
   const range = S.ovRange || 15, bucket = { 5: 10, 15: 30, 30: 60 }[range] || 30;
@@ -1016,10 +1026,25 @@ async function renderMatrix(full) {
   $("mxHint").textContent = `Share of each attack pod's flows (DNS excluded) that the model put in the expected class, from this lab's own runs. Live model now: ${mx.model_in_use === "k8s-lab-live" && rt.state !== "done" ? "k8s-lab-live (trained in the sandbox)" : mx.model_in_use}.`;
   $("rtBtn").disabled = rt.state === "running";
   $("rtState").textContent = rt.state === "running" ? `retraining… (started ${ago(rt.started_at)})` : rt.state === "done" ? `retrained ${ago(rt.finished_at)}` : rt.state === "failed" ? "retraining failed" : `${fmt(rt.labelled_sessions)} labelled run(s) available`;
-  $("rtOut").html = rt.state === "failed" ? errBox(`${rt.error}\n${(rt.log || "").slice(-600)}`) : rt.state === "done" && rt.result ? `<div class="grid kpis" style="grid-template-columns:repeat(auto-fill,minmax(150px,1fr))">` +
-    kpi("Held-out accuracy", rt.result.accuracy == null ? NA : pct(rt.result.accuracy, 1), rt.test_sessions.length ? `sessions ${rt.test_sessions.join(", ")}` : "no held-out run (run each attack twice)") +
-    kpi("Attack detection", rt.result.attack_detection_rate == null ? NA : pct(rt.result.attack_detection_rate, 1)) + kpi("False alarms", rt.result.false_alarm_rate == null ? NA : pct(rt.result.false_alarm_rate, 2)) +
-    `</div><p class="hint">New captures use the retrained model (stop and start capture if one is running). The previous model was kept${rt.backup ? " in " + esc(rt.backup) : ""}.</p>` : "";
+  $("rtOut").html = rt.state === "failed" ? errBox(`${rt.error}\n${(rt.log || "").slice(-600)}`) : rt.state === "done" && rt.result ? retrainResult(rt) : "";
+}
+// Retrain result: the decision (replaced or kept), per-class before/after on the SAME
+// held-out flows, and what data is missing.
+function retrainResult(rt) {
+  const pc = rt.result.per_class || {}, old = (rt.previous || {}).per_class || {};
+  const f3 = v => v == null ? NA : fmt(v, 3);
+  const delta = (n, o) => n == null || o == null ? "" : n > o + 0.001 ? ` <span style="color:var(--ok-ink,#3fb950)">▲</span>` : n < o - 0.001 ? ` <span style="color:var(--critical-ink)">▼</span>` : "";
+  const rows = Object.keys(pc).map(c => ({ c, n: pc[c], o: old[c] || {} }));
+  return `<p style="margin:0 0 8px">${pill(rt.replaced ? "new model is live" : "kept the current model", rt.replaced ? "ok" : "idle")} <span class="hint">${esc(rt.decision || "")}</span></p>` +
+    table([
+      { h: "Class", f: r => clsTag(r.c) }, { h: "Test flows", num: 1, f: r => fmt(r.n.support) },
+      { h: "Recall before", num: 1, f: r => f3(r.o.recall) }, { h: "Recall after", num: 1, f: r => f3(r.n.recall) + delta(r.n.recall, r.o.recall) },
+      { h: "Precision before → after", num: 1, f: r => `${f3(r.o.precision)} → ${f3(r.n.precision)}` },
+      { h: "F1 before → after", num: 1, f: r => `${f3(r.o.f1)} → ${f3(r.n.f1)}` },
+    ], rows) +
+    ((rt.warnings || []).length ? `<div class="hint" style="margin-top:8px;color:var(--warning-ink)">${rt.warnings.map(esc).join("<br>")}</div>` : "") +
+    `<p class="hint">Before and after are measured on the same held-out flows (every class with data is in the test set). ` +
+    (rt.replaced ? `New captures use the retrained model (stop and start capture if one is running). The previous model was kept${rt.backup ? " in " + esc(rt.backup) : ""}.` : "The retrained model was saved as a candidate and is not used.") + `</p>`;
 }
 async function pageLab(full) {
   await loadScenarios();
@@ -1330,6 +1355,7 @@ async function pageModel(full) {
     kpi("Accuracy", pct(m.accuracy, 2), "held-out test split"), kpi("Macro F1", fmt(m.macro_f1, 4), `weighted F1 ${fmt(m.weighted_f1, 4)}`),
     kpi("Attack detection", pct(m.attack_detection_rate, 2), `false alarms ${pct(m.false_alarm_rate, 3)}`),
   ].join("");
+  $("mdPerClassHint").textContent = md.source ? "Held-out lab flows: per scenario, the newest run is held out whole, or the last 25% of its flows when a scenario has only one run" : "Held-out CIC-IDS2017 test split";
   const per = Object.entries(m.per_class).map(([c, v]) => Object.assign({ c }, v));
   const macroP = per.reduce((a, r) => a + r.precision, 0) / per.length, macroR = per.reduce((a, r) => a + r.recall, 0) / per.length;
   $("mdPerClass").html = table([{ h: "Class", f: r => clsTag(r.c) }, { h: "Precision", num: 1, f: r => fmt(r.precision, 4) }, { h: "Recall", num: 1, f: r => fmt(r.recall, 4) },
@@ -1439,7 +1465,7 @@ $("capStop").onclick = async e => { const b = e.currentTarget; if (await confirm
 $("capProcess").onclick = e => act(e.currentTarget, () => api("/api/live/process?limit=50", { method: "POST" }), r => `Processed ${r.processed.length} PCAP(s): ${r.processed.filter(x => x.status === "classified").length} classified, ${r.processed.filter(x => x.status === "failed").length} failed`);
 $("evalBtn").onclick = e => runEval(e.currentTarget);
 $("labTargets").addEventListener("change", onScenario);
-$("rtBtn").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Retrain the live model on your lab runs?", "Trains on the flows of your own labelled Traffic-lab runs (the newest run of each attack is held out for testing). The current model is kept; new captures use the retrained one. Takes about a minute.")) act(b, () => api("/api/model/retrain-lab", { method: "POST" }), "Retraining started"); };
+$("rtBtn").onclick = async e => { const b = e.currentTarget; if (await confirmDlg("Retrain the live model on your lab runs?", "Trains on the flows of your own labelled Traffic-lab runs; part of every class is held out for testing. The new model replaces the current one only if its recall improves on those held-out flows, and the current model is backed up either way. Takes about a minute.")) act(b, () => api("/api/model/retrain-lab", { method: "POST" }), "Retraining started"); };
 $("labRun").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: true }) }),
   r => `${r.jobs.length} Job(s) created${r.launch_errors.length ? `, ${r.launch_errors.length} refused` : ""}. ${r.notes.join("; ")}. Waiting for the generator logs to confirm traffic…`);
 $("labLaunch").onclick = e => act(e.currentTarget, () => api("/api/pipeline/run", { method: "POST", body: Object.assign(labBody(), { auto_capture: false, auto_stop: false }) }),

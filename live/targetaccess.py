@@ -214,8 +214,18 @@ def _deployments(st: dict[str, Any]) -> dict[str, dict[str, int]]:
     return out
 
 
+_START_LOCK = threading.Lock()
+
+
 def start(cfg: dict[str, Any] | None = None, wait: bool = True) -> dict[str, Any]:
-    """Deploy what is missing, wait for Ready pods, start the port-forwards, probe the URLs."""
+    """Deploy what is missing, wait for Ready pods, start the port-forwards, probe the URLs.
+    Calls that overlap (dashboard start-up and a lab run at the same moment) run one after
+    the other; the second finds everything up and returns quickly."""
+    with _START_LOCK:
+        return _start(cfg, wait)
+
+
+def _start(cfg: dict[str, Any] | None = None, wait: bool = True) -> dict[str, Any]:
     cfg = cfg or load_config()
     st = settings(cfg)
     steps: list[str] = []
