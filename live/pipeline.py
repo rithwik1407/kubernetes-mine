@@ -26,7 +26,7 @@ from live.trafficlab import TrafficLabError, check_ready, job_detail, launch, li
 log = get_logger(__name__)
 
 KV_KEY = "pipeline_runs"
-KEEP = 20
+KEEP = 100                                # runs kept in the history (the detection matrix reads them; retraining also rebuilds older ones from scored flows)
 
 
 def _now() -> str:

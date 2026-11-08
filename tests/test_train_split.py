@@ -58,3 +58,14 @@ def test_gate_replaces_only_when_recall_improves():
     ok, why = tlm.gate(_m(BENIGN=0.99, DoS=0.65, PortScan=1.0), old)
     assert not ok and "no class's recall improved" in why
     assert tlm.gate(_m(DoS=0.1), None)[0]
+
+
+def test_cic_rows_are_sampled_per_class(tmp_path):
+    feats = ["Flow Duration", "Total Fwd Packets"]
+    df = pd.DataFrame({" Flow Duration": range(12), " Total Fwd Packets": 1,
+                       " Label": ["BENIGN"] * 4 + ["SSH-Patator"] * 3 + ["DoS slowloris"] * 3 + ["Heartbleed"] * 2})
+    p = tmp_path / "merged.csv"
+    df.to_csv(p, index=False)
+    X, y = tlm.load_cic(p, feats, 2, ["BENIGN", "BruteForce", "DoS", "WebAttack"])
+    assert y.value_counts().to_dict() == {"BENIGN": 2, "BruteForce": 2, "DoS": 2}
+    assert list(X.columns) == feats and len(X) == 6

@@ -34,6 +34,7 @@ import json
 import sqlite3
 import sys
 import time
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -61,9 +62,15 @@ CLASS_SCENARIO = {v: k for k, v in SCENARIO_CLASS.items()}
 
 
 def runs_by_session(conn) -> dict[int, list[dict]]:
-    """Traffic-lab Jobs (scenario, pod IP) per capture session, from the stored runs."""
+    """Traffic-lab Jobs (scenario, pod IP) per capture session.
+
+    The dashboard's run history keeps only the latest runs, so older runs are also rebuilt
+    from the scored flows themselves: each flow records the lab Job and scenario of its
+    generator pod (live/labsources.py), and its capture records the session. The pod IP is
+    the address that appears in every flow of that Job."""
     row = conn.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
     out: dict[int, list[dict]] = {}
+    seen: set[str] = set()
     for r in json.loads(row[0]) if row else []:
         sid = r.get("session_id")
         if not sid:
@@ -71,6 +78,45 @@ def runs_by_session(conn) -> dict[int, list[dict]]:
         for j in r.get("jobs", []):
             if j.get("pod_ip") and j.get("scenario"):
                 out.setdefault(int(sid), []).append({"scenario": j["scenario"], "pod_ip": j["pod_ip"], "job": j["job"]})
+                seen.add(j["job"])
+    for job, sc, sid, ip in archived_jobs(conn):
+        if job not in seen and (sc in SCENARIO_CLASS or sc in NO_CLASS):
+            out.setdefault(int(sid), []).append({"scenario": sc, "pod_ip": ip, "job": job})
+            seen.add(job)
+    return out
+
+
+def archived_jobs(conn) -> list[tuple[str, str, int, str]]:
+    """(job, scenario, session, pod IP) for every lab Job that has scored flows."""
+    try:
+        rows = conn.execute(
+            "SELECT d.lab_job, d.lab_scenario, COALESCE(d.session_id, c.session_id) sid, "
+            "d.src_ip, d.dst_ip FROM detections d LEFT JOIN captures c ON c.id = d.capture_id "
+            "WHERE d.lab_job IS NOT NULL AND d.lab_scenario IS NOT NULL AND d.simulated = 0").fetchall()
+    except sqlite3.Error:
+        return []
+    ips: dict[str, Counter] = {}
+    meta: dict[str, tuple[str, Counter]] = {}
+    nrows: Counter = Counter()
+    for job, sc, sid, src, dst in rows:
+        if not job.startswith("traffic-") or sc == "benign":      # the benign Deployment is background
+            continue
+        ips.setdefault(job, Counter()).update({src, dst})
+        nrows[job] += 1
+        m = meta.setdefault(job, (sc, Counter()))
+        if sid:
+            m[1][sid] += 1
+    # how many Jobs each address appears in: a target app serves many Jobs, a generator pod one
+    jobs_of: Counter = Counter(ip for cnt in ips.values() for ip in cnt)
+    out = []
+    for job, cnt in ips.items():
+        sc, sids = meta[job]
+        if not sids:
+            continue
+        cands = [ip for ip, n in cnt.items() if ip and n >= 0.9 * nrows[job]]   # in (nearly) every flow
+        if cands:
+            ip = min(cands, key=lambda a: (jobs_of[a], -cnt[a]))
+            out.append((job, sc, sids.most_common(1)[0][0], ip))
     return out
 
 
@@ -288,11 +334,16 @@ def main(argv: list[str] | None = None) -> int:
     Xb, yb = lab_benign(features)
     Xtr, ytr = pd.concat([Xtr.reset_index(drop=True), Xb], ignore_index=True), pd.concat([ytr, yb], ignore_index=True)
     cic_counts = {}
+    cic_error = None
     if a.cic_csv:
-        Xc, yc = load_cic(Path(a.cic_csv), features, a.cic_per_class, ["BENIGN"] + ATTACK)
-        cic_counts = yc.value_counts().to_dict()
-        Xtr, ytr = pd.concat([Xtr, Xc], ignore_index=True), pd.concat([ytr, yc], ignore_index=True)
-        print("CIC-IDS2017 rows added to training:", cic_counts)
+        try:
+            Xc, yc = load_cic(Path(a.cic_csv), features, a.cic_per_class, ["BENIGN"] + ATTACK)
+            cic_counts = yc.value_counts().to_dict()
+            Xtr, ytr = pd.concat([Xtr, Xc], ignore_index=True), pd.concat([ytr, yc], ignore_index=True)
+            print("CIC-IDS2017 rows added to training:", cic_counts)
+        except Exception as e:  # noqa: BLE001 - lab-only training still works
+            cic_error = f"CIC-IDS2017 rows not added ({type(e).__name__}: {e}); trained on lab flows only"
+            print("WARNING:", cic_error)
     lab_train = y[~test].value_counts().to_dict()
     warnings = []
     for c in ATTACK:
@@ -302,6 +353,8 @@ def main(argv: list[str] | None = None) -> int:
                             f"{CLASS_SCENARIO.get(c, c)} from the Traffic lab for a few minutes and retrain")
         if c in lab_train and c not in set(yte):
             warnings.append(f"{c}: no held-out flows, so its test metrics are missing")
+    if cic_error:
+        warnings.append(cic_error)
     for w in warnings:
         print("WARNING:", w)
     print("train", ytr.value_counts().to_dict(), "\ntest ", yte.value_counts().to_dict())
