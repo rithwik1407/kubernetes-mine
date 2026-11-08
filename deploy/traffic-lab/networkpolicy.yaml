@@ -1,12 +1,17 @@
-# Traffic-lab pods may reach only the lab target services, the decoys in
-# ids-deception, and cluster DNS. Any other egress fails (Network unreachable).
+# Traffic-lab pods may reach only the lab target namespace (any TCP port, so the
+# port_scan scenario gets real open/closed answers instead of silent drops), the
+# decoys in ids-deception, and cluster DNS. Any other egress is dropped, so the
+# generator cannot reach anything outside the lab.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
   name: traffic-lab-egress
   namespace: ids-traffic
 spec:
-  podSelector: {}
+  # every traffic-lab pod EXCEPT one the deception controller has quarantined
+  podSelector:
+    matchExpressions:
+      - {key: ids-deception/quarantine, operator: DoesNotExist}
   policyTypes: [Ingress, Egress]
   ingress: []
   egress:
@@ -15,10 +20,42 @@ spec:
             matchLabels:
               kubernetes.io/metadata.name: target-apps
       ports:
-        - {protocol: TCP, port: 1880}
-        - {protocol: TCP, port: 3000}
-        - {protocol: TCP, port: 8086}
-        - {protocol: TCP, port: 22}
+        - {protocol: TCP, port: 1, endPort: 65535}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ids-deception
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: decoy
+      ports:
+        - {protocol: TCP, port: 8080}
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - {protocol: UDP, port: 53}
+        - {protocol: TCP, port: 53}
+---
+# Quarantine: a traffic-lab pod the deception controller labelled as an attacker
+# (ids-deception/quarantine=true, live/redirect.py) may reach ONLY the decoys and DNS.
+# Its traffic to the real lab services is dropped; the decoys keep answering.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traffic-lab-quarantine
+  namespace: ids-traffic
+spec:
+  podSelector:
+    matchLabels:
+      ids-deception/quarantine: "true"
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
     - to:
         - namespaceSelector:
             matchLabels:

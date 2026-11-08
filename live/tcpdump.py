@@ -60,15 +60,10 @@ def build_command(tcpdump: str, interface: str, out_path: Path, snaplen: int = 0
 
 
 def choose_next_window(packets: int | None, duration_s: float, wcfg: dict[str, Any]) -> float:
-    """High packet rate -> shortest window, low rate -> longest, otherwise the default."""
-    if not packets or duration_s <= 0:
-        return float(wcfg["max_seconds"]) if packets == 0 else float(wcfg["default_seconds"])
-    pps = packets / duration_s
-    if pps >= wcfg["high_rate_pps"]:
-        return float(wcfg["min_seconds"])
-    if pps <= wcfg["low_rate_pps"]:
-        return float(wcfg["max_seconds"])
-    return float(wcfg["default_seconds"])
+    """Rate-only window choice (no threat evidence). Kept for callers of the old API;
+    the capture service uses live.window.decide with threat evidence."""
+    from live.window import Evidence, decide, initial_window
+    return decide(initial_window(wcfg), Evidence(packets=packets, duration_s=duration_s), wcfg).next_s
 
 
 def _parse_counts(stderr: str) -> tuple[int | None, int | None]:

@@ -7,6 +7,7 @@ so the same alias table that trained the model maps live captures too.
 """
 from __future__ import annotations
 
+import ipaddress
 import re
 import sys
 from pathlib import Path
@@ -83,5 +84,42 @@ def align_features(df: pd.DataFrame, features: list[str]) -> tuple[pd.DataFrame,
 
 
 def parse_timestamps(series: pd.Series) -> pd.Series:
-    """CICFlowMeter writes day-first timestamps, e.g. 30/10/2026 12:19:24 PM."""
-    return pd.to_datetime(series, format="mixed", dayfirst=True, errors="coerce")
+    """Flow start times from either CICFlowMeter build.
+
+    The live extractor (GintsEngelen fork) writes ISO times, "2026-11-05 11:00:12.836503".
+    The original CICFlowMeter-V3 writes day-first times, "30/10/2026 12:19:24 PM". Parsing
+    ISO strings with dayfirst=True swaps day and month whenever the day is 12 or less
+    (2026-11-05 became 2026-05-11). Every flow then looked months old, and the window-context
+    filter dropped all of them. So ISO is parsed strictly first, and only what does not
+    match falls back to day-first.
+    """
+    s = series.astype("string").str.strip()
+    out = pd.to_datetime(s, format="ISO8601", errors="coerce")
+    rest = out.isna() & s.notna()
+    if rest.any():
+        out = out.astype("datetime64[ns]")
+        out.loc[rest] = pd.to_datetime(s[rest], format="mixed", dayfirst=True, errors="coerce").astype("datetime64[ns]")
+    return out
+
+
+def _valid_ip(v) -> bool:
+    try:
+        ipaddress.ip_address(str(v).strip())
+        return True
+    except ValueError:
+        return False
+
+
+def drop_non_ip_flows(df: pd.DataFrame) -> tuple[pd.DataFrame, int]:
+    """Remove rows that are not IP flows.
+
+    CICFlowMeter turns ARP frames into flows: it reads the ARP header bytes as the IP
+    addresses, so a who-has/is-at pair becomes "8.6.0.1:0 -> 8.0.6.4:0, protocol 0"
+    (08 06 = ARP EtherType, 00 01 = hardware type, 08 00 06 04 = IPv4/MAC sizes).
+    Only applies when the CSV carries network columns (CIC MachineLearningCVE CSVs do not).
+    """
+    if PROTOCOL not in df.columns or SRC_IP not in df.columns or DST_IP not in df.columns or df.empty:
+        return df, 0
+    proto = pd.to_numeric(df[PROTOCOL], errors="coerce")
+    ok = proto.isin([1, 6, 17, 58]) & df[SRC_IP].map(_valid_ip) & df[DST_IP].map(_valid_ip)
+    return df.loc[ok].reset_index(drop=True), int((~ok).sum())

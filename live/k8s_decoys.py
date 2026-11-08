@@ -27,8 +27,17 @@ class DecoyError(RuntimeError):
     pass
 
 
-def decoy_name(profile: str) -> str:
-    return f"decoy-{profile}"
+NODE_LABEL = "ids/node"
+
+
+def node_slug(node: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", str(node or "").lower()).strip("-")[:20].strip("-")
+
+
+def decoy_name(profile: str, node: str | None = None) -> str:
+    """decoy-<profile>, or decoy-<profile>-<node> for a decoy pinned to the attacked pod's node."""
+    slug = node_slug(node)
+    return f"decoy-{profile}-{slug}" if slug else f"decoy-{profile}"
 
 
 class DecoyManager:
@@ -52,12 +61,12 @@ class DecoyManager:
         self._api_exc = client.exceptions.ApiException
 
     # --- rendering ------------------------------------------------------------------
-    def render(self, profile: str, replicas: int = 1) -> tuple[dict, dict]:
+    def render(self, profile: str, replicas: int = 1, node: str | None = None) -> tuple[dict, dict]:
         if profile not in self.profiles:
             raise DecoyError(f"unknown decoy profile {profile!r}")
         if not 1 <= int(replicas) <= self.max_replicas:
             raise DecoyError(f"replicas must be 1..{self.max_replicas}")
-        name = decoy_name(profile)
+        name = decoy_name(profile, node)
         if not _NAME_RE.match(name):
             raise DecoyError(f"invalid decoy name {name!r}")
         text = Template(self.template).substitute(
@@ -65,11 +74,16 @@ class DecoyManager:
         docs = [d for d in yaml.safe_load_all(text) if d]
         dep = next(d for d in docs if d["kind"] == "Deployment")
         svc = next(d for d in docs if d["kind"] == "Service")
+        if node:
+            # Node-specific deception: run the decoy on the node of the attacked pod.
+            for obj in (dep, dep["spec"]["template"]):
+                obj["metadata"]["labels"][NODE_LABEL] = node_slug(node)
+            dep["spec"]["template"]["spec"]["nodeSelector"] = {"kubernetes.io/hostname": node}
         return dep, svc
 
     # --- operations -----------------------------------------------------------------
-    def deploy(self, profile: str, replicas: int = 1) -> dict[str, Any]:
-        dep, svc = self.render(profile, replicas)
+    def deploy(self, profile: str, replicas: int = 1, node: str | None = None) -> dict[str, Any]:
+        dep, svc = self.render(profile, replicas, node)
         name = dep["metadata"]["name"]
         try:
             self.apps.create_namespaced_deployment(self.ns, dep)
@@ -84,7 +98,7 @@ class DecoyManager:
                 self._delete(name)
                 raise DecoyError(f"service create failed: {e.reason}") from e
             created = self.core.read_namespaced_service(name, self.ns)
-        return {"name": name, "service_ip": created.spec.cluster_ip, "port": int(self.profiles[profile]["port"])}
+        return {"name": name, "service_ip": created.spec.cluster_ip, "port": int(self.profiles[profile]["port"]), "node": node}
 
     def _owned(self, name: str) -> bool:
         try:
@@ -128,18 +142,40 @@ class DecoyManager:
     def list_decoys(self) -> dict[str, dict[str, Any]]:
         deps = self.apps.list_namespaced_deployment(self.ns, label_selector=SELECTOR).items
         svcs = {s.metadata.name: s for s in self.core.list_namespaced_service(self.ns, label_selector=SELECTOR).items}
+        try:
+            eps = {e.metadata.name: sum(len(ss.addresses or []) for ss in (e.subsets or []))
+                   for e in self.core.list_namespaced_endpoints(self.ns, label_selector=SELECTOR).items}
+        except self._api_exc:   # older RBAC without endpoints read: fall back to pod readiness only
+            eps = None
         out = {}
         for d in deps:
             name = d.metadata.name
             svc = svcs.get(name)
             out[name] = {
                 "name": name, "profile": (d.metadata.labels or {}).get("ids/profile"),
+                "node": ((d.spec.template.spec.node_selector or {}).get("kubernetes.io/hostname")
+                         if d.spec.template and d.spec.template.spec else None),
                 "replicas": d.spec.replicas or 0, "ready_replicas": d.status.ready_replicas or 0,
                 "created": d.metadata.creation_timestamp.isoformat() if d.metadata.creation_timestamp else None,
                 "service_ip": svc.spec.cluster_ip if svc else None,
                 "port": svc.spec.ports[0].port if svc and svc.spec.ports else None,
+                "service": svc is not None,
+                # Ready addresses behind the Service: the decoy is reachable only when this is > 0.
+                "endpoints": None if eps is None else eps.get(name, 0),
             }
         return out
+
+    def decoy_pods(self) -> list[dict[str, Any]]:
+        """Every decoy pod as Kubernetes reports it right now (name, node, IP, phase, readiness)."""
+        out = []
+        for p in self.core.list_namespaced_pod(self.ns, label_selector=SELECTOR).items:
+            conds = {c.type: c.status for c in (p.status.conditions or [])} if p.status else {}
+            out.append({"pod": p.metadata.name, "namespace": self.ns, "decoy": (p.metadata.labels or {}).get("ids/decoy"),
+                        "node": p.spec.node_name if p.spec else None, "ip": p.status.pod_ip if p.status else None,
+                        "phase": p.status.phase if p.status else None, "ready": conds.get("Ready") == "True",
+                        "deleting": p.metadata.deletion_timestamp is not None,
+                        "created": p.metadata.creation_timestamp.isoformat() if p.metadata.creation_timestamp else None})
+        return sorted(out, key=lambda r: r["created"] or "")
 
     def interaction_lines(self, name: str, since_seconds: int) -> list[tuple[str, dict[str, Any]]]:
         """(pod, parsed JSON line) for request log lines of a decoy's pods."""

@@ -28,7 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from live.process_pcap import DONE_STATUSES, process_pcap
-from live.tcpdump import CaptureError, capture_window, choose_next_window, validate_interface
+from live.tcpdump import CaptureError, capture_window, validate_interface
+from live import window as adaptive
 from live import db
 from live.config import REPO_ROOT as PROJECT_ROOT, get_path, load_config, project_path
 from live.logging_setup import get_logger
@@ -147,6 +148,7 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
     work: queue.Queue = queue.Queue()
     stats: dict[str, Any] = {"windows": 0, "processed": 0, "failed": 0, "last_window": None, "last_result": None}
     lock = threading.Lock()
+    evidence = adaptive.Evidence()
     predictor = None
     if process:
         from live.predictor import FlowPredictor
@@ -158,25 +160,46 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
             if item is None:
                 return
             pcap, end_mono, fields = item
+            t_proc = time.monotonic()
             try:
                 res = process_pcap(Path(pcap), predictor, cfg, window_end_monotonic=end_mono, capture_fields=fields)
             except Exception as e:  # keep the service alive; the failure is recorded
                 log.exception("processing %s failed", pcap)
                 res = {"pcap": Path(pcap).name, "status": "failed", "error": str(e)}
             with lock:
+                evidence.processing_s = time.monotonic() - t_proc
                 stats["processed"] += 1
                 stats["failed"] += res.get("status") == "failed"
                 stats["last_result"] = res
+                if res.get("status") in DONE_STATUSES:
+                    ev = res.get("evidence") or {}
+                    threat = bool(ev.get("malicious_flows") or ev.get("bursts"))
+                    evidence.malicious_flows = int(ev.get("malicious_flows") or 0)
+                    evidence.bursts = int(ev.get("bursts") or 0)
+                    evidence.flows = int(res.get("detections") or 0)
+                    evidence.top_class = ev.get("top_class")
+                    evidence.max_confidence = ev.get("max_confidence")
+                    evidence.scored_window = res.get("pcap")
+                    evidence.calm_streak = 0 if threat else evidence.calm_streak + 1
             _enforce_retention(cfg)
 
     thread = threading.Thread(target=worker, daemon=True) if process else None
     if thread:
         thread.start()
 
-    window = float(wcfg["default_seconds"])
+    window = adaptive.initial_window(wcfg)
+    started = _now()
+    with db.connect(db.db_path(cfg)) as conn:   # every capture start is a new session
+        session_id = db.insert_row(conn, "capture_sessions", started_at=started, pid=os.getpid(),
+                                   interface=cfg["capture"]["interface"], scenarios="[]", jobs="[]", run_ids="[]")
     base = {"status": "running", "pid": os.getpid(), "interface": cfg["capture"]["interface"],
-            "started_at": _now(), "processing": process, "window_limit": windows}
+            "started_at": started, "processing": process, "window_limit": windows,
+            "window_sizes": adaptive.window_sizes(wcfg), "session_id": session_id}
     final: dict[str, Any] = {"status": "stopped"}
+    with db.connect(db.db_path(cfg)) as conn:
+        db.insert_row(conn, "window_transitions", created_at=_now(), previous_s=None, next_s=window, rule="start",
+                      reason=f"capture started with the configured initial window {window:g}s", changed=1,
+                      evidence=json.dumps({}))
     try:
         while not stop.is_set() and (windows is None or stats["windows"] < windows):
             with lock:
@@ -187,17 +210,27 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
                 log.error("capture failed: %s", res.error)
                 final = {"status": "error", "error": res.error}
                 raise CaptureError(res.error)
-            next_window = choose_next_window(res.packets, res.duration_s, wcfg)
+            with lock:
+                ev = adaptive.Evidence(**{**evidence.__dict__, "packets": res.packets, "duration_s": res.duration_s,
+                                          "backlog": work.qsize() if process else 0})
+            decision = adaptive.decide(window, ev, wcfg)
+            next_window = decision.next_s
             fields = {"interface": res.interface, "started_at": res.started_at, "ended_at": res.ended_at,
                       "duration_s": res.duration_s, "packets": res.packets, "bytes": res.bytes,
-                      "next_window_s": next_window, "status": "captured"}
+                      "window_s": window, "next_window_s": next_window, "status": "captured",
+                      "session_id": session_id}
             with db.connect(db.db_path(cfg)) as conn:
                 db.upsert_capture(conn, Path(res.pcap).name, **fields)
+                db.insert_row(conn, "window_transitions", created_at=_now(), pcap_file=Path(res.pcap).name,
+                              previous_s=decision.previous_s, next_s=decision.next_s, rule=decision.rule,
+                              reason=decision.reason, changed=int(decision.changed),
+                              evidence=json.dumps(decision.evidence, default=str))
             with lock:
                 stats["windows"] += 1
                 stats["last_window"] = res.to_dict()
-            log.info("window %d: %s %.1fs %s packets -> next window %.0fs", stats["windows"],
-                     Path(res.pcap).name, res.duration_s, res.packets, next_window)
+                stats["last_decision"] = decision.to_dict()
+            log.info("window %d: %s %.1fs %s packets -> %s next window %gs (%s)", stats["windows"],
+                     Path(res.pcap).name, res.duration_s, res.packets, decision.rule, next_window, decision.reason)
             if process:
                 work.put((res.pcap, end_mono, {k: v for k, v in fields.items() if k != "status"}))
             window = next_window
@@ -205,8 +238,11 @@ def run(windows: int | None = None, process: bool = True, cfg: dict[str, Any] | 
         if thread:
             work.put(None)
             thread.join()
+        stopped = _now()
+        with db.connect(db.db_path(cfg)) as conn:
+            conn.execute("UPDATE capture_sessions SET stopped_at = ? WHERE id = ?", (stopped, session_id))
         with lock:
-            write_state(cfg, **{**base, **final}, stopped_at=_now(), **stats)
+            write_state(cfg, **{**base, **final}, stopped_at=stopped, **stats)
         pid_file.unlink(missing_ok=True)
         if fcntl:
             fcntl.flock(lock_fh, fcntl.LOCK_UN)

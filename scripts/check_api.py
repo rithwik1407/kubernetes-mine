@@ -37,7 +37,7 @@ def main() -> int:
 
     print("\n== Python packages")
     missing = []
-    for mod in ("fastapi", "uvicorn", "pandas", "sklearn", "joblib", "yaml", "kubernetes", "multipart"):
+    for mod in ("fastapi", "uvicorn", "pandas", "sklearn", "joblib", "yaml", "kubernetes", "multipart", "httpx"):
         try:
             __import__(mod)
         except ImportError:
@@ -102,7 +102,24 @@ def main() -> int:
 
     print("\n== Traffic generator")
     get("/api/trafficlab/scenarios")
-    get("/api/trafficlab/jobs", warn_if=lambda b: b[0]["error"] if b and "error" in b[0] else None)
+    r = c.get("/api/trafficlab/jobs")
+    line("OK" if r.status_code == 200 else "WARN", "GET /api/trafficlab/jobs", str(r.status_code) + ("" if r.status_code == 200 else " " + r.text[:100]))
+    get("/api/trafficlab/baseline", warn_if=lambda b: None if b.get("available") else b.get("error"))
+
+    print("\n== Model, window, system")
+    get("/api/model")
+    get("/api/model/evaluate-sample", "GET /api/model/evaluate-sample (labelled check)",
+        warn_if=lambda b: None if b["accuracy"] > 0.95 else f"accuracy only {b['accuracy']:.3f}")
+    get("/api/window/status")
+    get("/api/window/history?limit=5")
+    get("/api/live/events?limit=5")
+    get("/api/live/timeline")
+    h = get("/api/system/health", warn_if=lambda b: None if b["status"] == "ok" else f"overall {b['status']}")
+    if h:
+        for comp in h["components"]:
+            line("OK" if comp["status"] in ("ok", "idle") else "WARN", "  " + comp["component"], comp["detail"] or "")
+    get("/api/system/resources")
+    get("/api/system/logs?limit=5")
 
     print("\n== Deception")
     for p in ("/api/deception/status", "/api/deception/policy", "/api/deception/decisions?limit=5",
@@ -112,7 +129,7 @@ def main() -> int:
     if args.live:
         print("\n== Real run: port_scan with auto-capture")
         r = c.post("/api/pipeline/run", json={"scenario": "port_scan", "count": 200})
-        line("OK" if r.status_code == 200 else "FAIL", "POST /api/pipeline/run", r.text[:160])
+        line("OK" if r.status_code == 201 else "FAIL", "POST /api/pipeline/run", r.text[:160])
 
     fails = sum(s == "FAIL" for s, _, _ in results)
     warns = sum(s == "WARN" for s, _, _ in results)

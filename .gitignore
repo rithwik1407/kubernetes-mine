@@ -17,3 +17,7 @@ captures/flows/
 data/ids.sqlite*
 logs/
 config/*.kubeconfig
+
+# models retrained on a local lab (dashboard Retrain button) and their backups
+models/k8s-lab-local/
+models/*/history/
