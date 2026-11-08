@@ -168,14 +168,15 @@ def _with_nodes(rows: list[dict]) -> list[dict]:
 
 
 @router.get("/api/live/flow-graph")
-def live_flow_graph(seconds: int = Query(60, ge=5, le=3600), max_edges: int = Query(14, ge=1, le=40)):
+def live_flow_graph(seconds: int = Query(60, ge=5, le=3600), max_edges: int = Query(14, ge=1, le=40),
+                    recent: int = Query(10, ge=2, le=120)):
     """Attacker/client -> target -> decoy graph of the last `seconds` (for the flow diagrams)."""
     engs = []
     try:
         engs = [e for e in controller().engagement_details(10)["engagements"] if e["state"] == "active"]
     except Exception:  # noqa: BLE001 - the graph still works without deception
         pass
-    return queries.flow_graph(seconds, max_edges, CFG, engagements=engs)
+    return queries.flow_graph(seconds, max_edges, CFG, engagements=engs, recent_seconds=recent)
 
 
 @router.get("/api/live/threat-counter")
@@ -303,6 +304,21 @@ def predict(req: PredictRequest):
             "predictions": to_records(out)}
 
 
+def _reload_predictor() -> None:
+    """A retrained model went live: the next scored window loads it."""
+    with _lock:
+        _STATE.pop("predictor", None)
+
+
+def _register_retrain_hook() -> None:
+    from live import retrain
+    if _reload_predictor not in retrain._ON_DONE:
+        retrain._ON_DONE.append(_reload_predictor)
+
+
+_register_retrain_hook()
+
+
 @router.get("/api/model/retrain-lab")
 def model_retrain_status():
     from live import retrain
@@ -315,11 +331,8 @@ def model_retrain_start():
     model is copied to <model_dir>/history/ first). New captures use the new model."""
     from live import retrain
 
-    def reload():
-        with _lock:
-            _STATE.pop("predictor", None)
     try:
-        return retrain.start(CFG, on_done=reload)
+        return retrain.start(CFG, on_done=_reload_predictor)
     except RuntimeError as e:
         raise HTTPException(409, str(e))
 
@@ -379,9 +392,10 @@ def trafficlab_scenarios():
 
 
 @router.get("/api/trafficlab/detection-matrix")
-def trafficlab_detection_matrix():
-    """Detection rate per scenario x target, measured from this lab's own runs."""
-    return queries.detection_matrix(CFG)
+def trafficlab_detection_matrix(all_models: bool = False):
+    """Detection rate per scenario x target, measured from this lab's own runs (by default
+    only flows scored by the live model; all_models=true mixes in earlier models too)."""
+    return queries.detection_matrix(CFG, model=None if all_models else "live")
 
 
 @router.post("/api/trafficlab/launch", status_code=201)
@@ -704,10 +718,19 @@ def targets_start():
 
 def _autostart_loop() -> None:
     """Bring the target apps up when the dashboard starts; if the cluster is not up yet
-    (K3s still starting), try again every 30 s for 15 minutes."""
+    (K3s still starting), try again every 30 s for 15 minutes. Also updates an old
+    generator script in the cluster."""
     import time as _time
     for _ in range(30):
         _start_targets()
+        if (_STATE.get("targets_start") or {}).get("state") == "done":
+            try:
+                from live.trafficlab import ensure_generator_current
+                note = ensure_generator_current(CFG)
+                if note:
+                    log.info("%s", note)
+            except Exception as e:  # noqa: BLE001
+                log.warning("could not check the generator script: %s", e)
         if (_STATE.get("targets_start") or {}).get("state") == "done":
             return
         _time.sleep(30)

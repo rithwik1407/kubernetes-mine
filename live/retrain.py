@@ -32,14 +32,24 @@ _LOCK = threading.Lock()
 SCRIPT = repo_path("scripts/train_lab_model.py")
 
 
+def _script():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("train_lab_model", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
 def labelled_sessions(cfg: dict[str, Any]) -> dict[int, list[str]]:
-    with db.connect(db.db_path(cfg)) as c:
-        row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
-    out: dict[int, list[str]] = {}
-    for r in json.loads(row[0]) if row else []:
-        if r.get("session_id"):
-            out.setdefault(int(r["session_id"]), []).extend(j["scenario"] for j in r.get("jobs", []) if j.get("pod_ip"))
-    return {k: v for k, v in out.items() if v}
+    """Capture sessions with labelled Traffic-lab Jobs: the stored runs plus older runs
+    rebuilt from the scored flows (the same set the training script uses)."""
+    import sqlite3
+    conn = sqlite3.connect(str(db.db_path(cfg)))
+    try:
+        runs = _script().runs_by_session(conn)
+    finally:
+        conn.close()
+    return {k: [j["scenario"] for j in v] for k, v in runs.items() if v}
 
 
 def choose_test_sessions(sessions: dict[int, list[str]]) -> list[int]:
@@ -56,8 +66,12 @@ def status() -> dict[str, Any]:
         return dict(_STATE)
 
 
-def start(cfg: dict[str, Any] | None = None, on_done=None) -> dict[str, Any]:
+_ON_DONE: list = []          # set by the API: reload the predictor when a new model goes live
+
+
+def start(cfg: dict[str, Any] | None = None, on_done=None, reason: str = "manual") -> dict[str, Any]:
     cfg = cfg or load_config()
+    on_done = on_done or (_ON_DONE[0] if _ON_DONE else None)
     with _LOCK:
         if _STATE["state"] == "running":
             raise RuntimeError("a retraining is already running")
@@ -70,7 +84,7 @@ def start(cfg: dict[str, Any] | None = None, on_done=None) -> dict[str, Any]:
         # the model that is live now: the new one replaces it only if per-class recall improves
         current = model_dir if (model_dir / "best_model.joblib").is_file() else get_path("model_dir", cfg)
         _STATE.update(state="running", started_at=datetime.now(timezone.utc).isoformat(), finished_at=None,
-                      log="", error=None, test_sessions=test, backup=None, sessions=len(sessions),
+                      log="", error=None, test_sessions=test, backup=None, sessions=len(sessions), reason=reason,
                       scenarios=sorted({s for v in sessions.values() for s in v}))
 
     def work():

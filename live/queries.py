@@ -484,11 +484,17 @@ def recent_pods(engagements: list[dict[str, Any]], minutes: int = 60, cfg=None,
     return sorted(rows.values(), key=lambda r: (str(r["first_seen"]), r["pod"]), reverse=True)
 
 
-def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
+def detection_matrix(cfg=None, max_runs: int = 200, model: str | None = "live") -> dict[str, Any]:
     """Per scenario x target: how many of the attack pod's flows the model put in the
     expected class (detection rate) and in any attack class, from this lab's own runs.
-    Ground truth = the Traffic-lab Job's pod IP in its capture session; DNS is left out."""
+    Ground truth = the Traffic-lab Job's pod IP in its capture session; DNS is left out.
+
+    model="live" (default): only flows scored by the model that is live now, so older runs
+    scored by earlier models do not mix in; None: every run, whatever model scored it."""
     cfg = cfg or load_config()
+    from live.predictor import active_model_dir
+    live_name = active_model_dir(cfg).name
+    only = live_name if model == "live" else model
     cells: dict[tuple[str, str], dict[str, Any]] = {}
     with db.connect(db.db_path(cfg)) as c:
         row = c.execute("SELECT value FROM kv WHERE key = 'pipeline_runs'").fetchone()
@@ -506,8 +512,9 @@ def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
                     "GROUP_CONCAT(DISTINCT model) models FROM detections WHERE session_id = ? AND lab_scenario = ? "
                     "AND (src_ip = ? OR dst_ip = ?) AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 "
                     # the benign requests an attack pod mixes in are not the attack
-                    "AND COALESCE(src_port, 0) NOT BETWEEN ? AND ? AND COALESCE(dst_port, 0) NOT BETWEEN ? AND ?",
-                    (exp or "BENIGN", sid, sc, ip, ip, lo, hi, lo, hi)).fetchone()
+                    "AND COALESCE(src_port, 0) NOT BETWEEN ? AND ? AND COALESCE(dst_port, 0) NOT BETWEEN ? AND ? "
+                    "AND (? IS NULL OR model = ?)",
+                    (exp or "BENIGN", sid, sc, ip, ip, lo, hi, lo, hi, only, only)).fetchone()
                 if not r["n"]:
                     continue
                 tgt = (j.get("target_label") or j.get("target") or "?").split(".")[0].split(":")[0]
@@ -528,7 +535,7 @@ def detection_matrix(cfg=None, max_runs: int = 200) -> dict[str, Any]:
                     "detection_rate": cell["detected"] / n if n else None,
                     "attack_rate": cell["malicious"] / n if n else None})
     out.sort(key=lambda x: (x["scenario"], x["target"]))
-    return {"cells": out, "model_in_use": cfg["paths"]["model_dir"].rstrip("/").split("/")[-1]}
+    return {"cells": out, "model_in_use": live_name, "filtered_to": only}
 
 
 def _severity(conf: float | None, malicious: bool, th: dict[str, Any]) -> str:
@@ -542,7 +549,7 @@ def _severity(conf: float | None, malicious: bool, th: dict[str, Any]) -> str:
 
 
 def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | None = None,
-               engagements: list[dict] | None = None) -> dict[str, Any]:
+               engagements: list[dict] | None = None, recent_seconds: int = 10) -> dict[str, Any]:
     """Who talked to whom in the last `seconds`: nodes (pod, namespace, node, role) and
     edges (flows, packets, malicious flows, class, severity), for the flow diagrams.
     Roles: attacker (source of malicious flows), client, target, decoy. Control-plane
@@ -550,16 +557,19 @@ def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | No
     target -> decoy."""
     cfg = cfg or load_config()
     th = cfg["deception"].get("thresholds", {})
-    since = (datetime.now(timezone.utc) - timedelta(seconds=int(seconds))).isoformat()
+    now = datetime.now(timezone.utc)
+    since = (now - timedelta(seconds=int(seconds))).isoformat()
+    recent_since = (now - timedelta(seconds=int(recent_seconds))).isoformat()
     with db.connect(db.db_path(cfg)) as c:
         rows = [dict(r) for r in c.execute(
             "SELECT src_ip, dst_ip, COUNT(*) flows, COALESCE(SUM(packets), 0) packets, SUM(is_malicious) mal, "
+            "SUM(CASE WHEN detected_at >= ? THEN 1 ELSE 0 END) recent, "
             "MAX(CASE WHEN is_malicious = 1 THEN confidence END) conf, MAX(detected_at) last, "
             "(SELECT predicted_class FROM detections d2 WHERE d2.src_ip = d.src_ip AND d2.dst_ip = d.dst_ip "
             " AND d2.is_malicious = 1 AND d2.detected_at >= ? GROUP BY predicted_class ORDER BY COUNT(*) DESC LIMIT 1) cls "
             "FROM detections d WHERE detected_at >= ? AND simulated = 0 AND allowlisted IS NULL "
             "AND COALESCE(src_port, 0) != 53 AND COALESCE(dst_port, 0) != 53 AND src_ip IS NOT NULL AND dst_ip IS NOT NULL "
-            "GROUP BY src_ip, dst_ip", (since, since))]
+            "GROUP BY src_ip, dst_ip", (recent_since, since, since))]
     if pods is None:
         from live import podinfo
         pods = podinfo.get(cfg)
@@ -590,8 +600,9 @@ def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | No
         if rank[ra] > rank[rb]:                     # a reply recorded backwards: point it forward
             a, b, ra, rb = b, a, rb, ra
         e = edges.setdefault((a, b), {"src": a, "dst": b, "flows": 0, "packets": 0, "malicious": 0, "conf": None,
-                                      "class": None, "last": None})
+                                      "class": None, "last": None, "recent": 0})
         e["flows"] += r["flows"]
+        e["recent"] += r["recent"] or 0
         e["packets"] += r["packets"]
         e["malicious"] += r["mal"] or 0
         if r["conf"] is not None and (e["conf"] is None or r["conf"] > e["conf"]):
@@ -604,10 +615,11 @@ def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | No
         for dip in e.get("decoy_pod_ips") or []:
             if (e["src_ip"], dip) not in edges and dip in pods:
                 edges[(e["src_ip"], dip)] = {"src": e["src_ip"], "dst": dip, "flows": 0, "packets": 0, "malicious": 0,
-                                             "conf": None, "class": None, "last": None, "redirect": True}
+                                             "conf": None, "class": None, "last": None, "redirect": True, "recent": 0}
                 break
     chosen = sorted(edges.values(), key=lambda e: (-(e["malicious"] > 0), -e["flows"]))[:max_edges]
     for e in chosen:
+        e["rate"] = round(e["recent"] / max(1, int(recent_seconds)), 2)    # flows/s scored just now
         e["severity"] = _severity(e["conf"], e["malicious"] > 0, th)
         e["redirect"] = e.get("redirect") or (pods.get(e["dst"], {}).get("namespace") == decoy_ns)
     ips = {x for e in chosen for x in (e["src"], e["dst"])}
@@ -621,8 +633,8 @@ def flow_graph(seconds: int = 60, max_edges: int = 14, cfg=None, pods: dict | No
                       "label": p["pod"] if p else ip, "namespace": p["namespace"] if p else None,
                       "node": p["node"] if p else None,
                       "scenario": (p.get("labels") or {}).get("scenario") if p else None})
-    return {"seconds": int(seconds), "since": since, "nodes": nodes, "edges": chosen,
-            "truncated": max(0, len(edges) - len(chosen))}
+    return {"seconds": int(seconds), "since": since, "recent_seconds": int(recent_seconds), "at": now.isoformat(),
+            "nodes": nodes, "edges": chosen, "truncated": max(0, len(edges) - len(chosen))}
 
 
 def engagement_replay(eng: dict[str, Any], cfg=None, frames: int = 24, pods: dict | None = None) -> dict[str, Any]:

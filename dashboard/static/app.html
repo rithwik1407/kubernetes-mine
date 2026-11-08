@@ -174,6 +174,11 @@ tr.mal td:first-child { box-shadow: inset 2px 0 0 var(--critical); }
 .flowdia .fd-col { fill: var(--muted); font: 600 10.5px Inter, system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
 .flowdia .fd-legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 11.5px; color: var(--muted); margin-top: 6px; }
 .flowdia .fd-legend i { display: inline-block; width: 18px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+.flowdia .fd-rate { font-size: 11px; font-weight: 600; fill: var(--text-2); paint-order: stroke; stroke: var(--surface); stroke-width: 3px; }
+.flowdia .fd-edge.idle { stroke-dasharray: 4 5; }
+.live-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; background: var(--ok, #3fb950); margin-right: 5px; animation: livepulse 1.6s ease-in-out infinite; }
+@keyframes livepulse { 0%, 100% { opacity: 1; } 50% { opacity: .25; } }
+@media (prefers-reduced-motion: reduce) { .live-dot { animation: none; } }
 @media (prefers-reduced-motion: reduce) { .flowdia .fd-node, .flowdia .fd-edge { transition: none; } .flowdia .fd-particle { display: none; } }
 .chart.tall { height: 340px; }
 .kv { display: grid; grid-template-columns: max-content 1fr; gap: 6px 14px; font-size: 13px; }
@@ -365,7 +370,7 @@ dialog .actions { display: flex; justify-content: flex-end; gap: 8px; }
     <div class="card"><div class="card-head"><div><h2>Controller</h2><p class="hint" id="decHint">—</p></div>
       <div style="display:flex;gap:8px;flex-wrap:wrap"><button class="btn primary" id="decEnable">Enable automatic deception</button><button class="btn" id="decDisable">Disable</button><button class="btn" id="decCycle">Run cycle now</button></div></div>
       <div class="grid kpis" id="decKpis"></div></div>
-    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Live deception</h2><p class="hint">Each engaged attacker: the pod its attack hits, the decoy placed on that pod's node, and the traffic that has reached the decoy. Decoy flows are counted from captured flows between the attacker and the decoy pod IPs; requests from the decoy's own log.</p></div></div>
+    <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Live deception <span class="hint" id="decLiveRate" style="font-weight:400;font-size:12px;margin-left:6px"></span></h2><p class="hint">Each engaged attacker: the pod its attack hits, the decoy placed on that pod's node, and the traffic that has reached the decoy. Decoy flows are counted from captured flows between the attacker and the decoy pod IPs; requests from the decoy's own log.</p></div></div>
       <div id="decFlow" class="flowdia" style="margin-bottom:12px"></div>
       <div id="decLive"><div class="loading">Loading…</div></div></div>
     <div class="card" style="margin-top:14px"><div class="card-head"><div><h2>Detected but not engaged</h2><p class="hint">Every source the model or the behaviour rules flagged in the last 6 hours that did not get a decoy when it was flagged, one row per source, newest first. A detection only engages deception when one source sends at least the class's <b>N flows</b> within <b>T seconds</b> at or above the chosen severity (see Detection thresholds). Otherwise the row says why: too few flows, below severity, cooldown after a release, decoy limit, control-plane / allowlisted, reply traffic of a target, or decoy traffic. If the source was engaged later, the Later column links to it.</p></div></div><div id="decNot"></div></div>
@@ -596,7 +601,7 @@ function flowDiagram(id, g, opts = {}) {
     host.dataset.fd = "1";
     host.innerHTML = `<svg role="img" aria-label="${esc(opts.label || "Traffic flow diagram")}"><defs>
       <filter id="${id}-glow" filterUnits="userSpaceOnUse" x="-40" y="-40" width="6000" height="4000"><feGaussianBlur stdDeviation="3.2" result="b"/><feMerge><feMergeNode in="b"/><feMergeNode in="SourceGraphic"/></feMerge></filter>
-      </defs><g class="cols"></g><g class="edges"></g><g class="parts"></g><g class="nodes"></g></svg>
+      </defs><g class="cols"></g><g class="edges"></g><g class="parts"></g><g class="rates"></g><g class="nodes"></g></svg>
       <div class="fd-legend"><span><i style="background:${cssVar("--critical")}"></i>high severity</span><span><i style="background:${cssVar("--serious")}"></i>medium</span><span><i style="background:${cssVar("--warning")}"></i>low</span><span><i style="background:${cssVar("--c-benign")}"></i>benign</span><span><i style="background:repeating-linear-gradient(90deg,${cssVar("--accent")} 0 5px,transparent 5px 9px)"></i>redirected to decoy</span><span class="fd-trunc"></span></div>`;
     svg = host.querySelector("svg");
   }
@@ -648,18 +653,32 @@ function flowDiagram(id, g, opts = {}) {
     el.setAttribute("id", `${id}-e-${ek(e).replace(/[^0-9a-z]/gi, "_")}`);
     el.setAttribute("d", path(e)); el.style.d = `path("${path(e)}")`;
     el.setAttribute("stroke", color(e)); el.setAttribute("stroke-width", (1.5 + 5 * Math.sqrt(e.flows / maxF)).toFixed(2));
-    el.setAttribute("stroke-opacity", e.severity === "benign" ? 0.45 : 0.9);
+    // live mode: a path with no flows scored in the last few seconds dims; an active one is bright
+    const idle = opts.live && !(e.recent > 0);
+    el.setAttribute("stroke-opacity", idle ? 0.18 : e.severity === "benign" ? 0.45 : 0.9);
+    el.classList.toggle("idle", !!idle);
     if (SEV_RANK[e.severity] >= 2) el.setAttribute("filter", `url(#${id}-glow)`); else el.removeAttribute("filter");
     el.innerHTML = `<title>${esc(e.src)} → ${esc(e.dst)}: ${fmt(e.flows)} flows, ${fmt(e.packets)} packets, ${fmt(e.malicious)} malicious${e.class ? " (" + esc(e.class) + ", max confidence " + fmt(e.conf, 2) + ")" : ""}${e.redirect ? " · redirected to decoy" : ""}</title>`;
   });
   // particles: more and faster for busier / more severe paths; rebuilt only when the path changes
-  sync(".parts", g.edges.filter(e => e.flows > 0 || e.redirect), ek, () => document.createElementNS(NS, "g"), (el, e) => {
-    const sig = `${path(e)}|${e.severity}|${Math.ceil(4 * e.flows / maxF)}`;
+  // live mode: particles only on paths with traffic right now, more and faster as the rate grows
+  const maxR = Math.max(1, ...g.edges.map(e => e.rate || 0));
+  const moving = opts.live ? g.edges.filter(e => e.recent > 0) : g.edges.filter(e => e.flows > 0 || e.redirect);
+  sync(".parts", moving, ek, () => document.createElementNS(NS, "g"), (el, e) => {
+    const load = opts.live ? (e.rate || 0) / maxR : e.flows / maxF;
+    const sig = `${path(e)}|${e.severity}|${Math.ceil(4 * load)}`;
     if (el.dataset.sig === sig) return;
     el.dataset.sig = sig;
-    const n = e.severity === "benign" ? 1 : Math.max(1, Math.ceil(4 * e.flows / maxF)), dur = (SEV_RANK[e.severity] >= 2 ? 1.6 : 2.6) + Math.random() * 0.4;
+    const n = e.severity === "benign" ? 1 : Math.max(1, Math.ceil(4 * load)), dur = (SEV_RANK[e.severity] >= 2 ? 1.6 : 2.6) * (opts.live ? 1.25 - 0.6 * load : 1) + Math.random() * 0.4;
     el.innerHTML = Array.from({ length: n }, (_, i) => `<circle class="fd-particle" r="${SEV_RANK[e.severity] >= 2 ? 3.2 : 2.4}" fill="${color(e)}" opacity="0.95"><animateMotion dur="${dur.toFixed(2)}s" begin="${(-i * dur / n).toFixed(2)}s" repeatCount="indefinite" path="${path(e)}" calcMode="spline" keyTimes="0;1" keySplines="0.4 0 0.6 1"/></circle>`).join("");
   });
+  if (opts.live) {
+    sync(".rates", g.edges.filter(e => e.recent > 0), ek, () => document.createElementNS(NS, "text"), (el, e) => {
+      const a = xy(e.src), b = xy(e.dst), x = (a.x + b.x + nodeW) / 2, y = (a.y + b.y + nodeH) / 2 - 6;
+      el.setAttribute("class", "fd-rate"); el.setAttribute("x", x.toFixed(1)); el.setAttribute("y", y.toFixed(1));
+      el.setAttribute("text-anchor", "middle"); el.textContent = `${fmt(e.rate, e.rate < 10 ? 1 : 0)}/s`;
+    });
+  }
   sync(".nodes", g.nodes, n => n.id, () => document.createElementNS(NS, "g"), (el, n) => {
     const p = xy(n.id);
     el.setAttribute("class", `fd-node role-${n.role} sev-${n.severity}`);
@@ -746,9 +765,8 @@ function drawActivity(act) {
     hoverlabel: { bgcolor: cssVar("--surface-2"), bordercolor: cssVar("--border"), font: { color: cssVar("--text"), size: 12 } },
     uirevision: "act-" + act.minutes,
     transition: first ? { duration: 0 } : { duration: 600, easing: "cubic-in-out" },
-    xaxis: Object.assign(layout().xaxis, { type: "date", autorange: true, hoverformat: "%H:%M:%S", tickformat: act.minutes <= 5 ? "%H:%M:%S" : "%H:%M", nticks: 7, showgrid: false,
-      showspikes: true, spikemode: "across", spikesnap: "cursor", spikethickness: 1, spikedash: "dot", spikecolor: cssVar("--muted") }),
-    yaxis: Object.assign(layout().yaxis, { title: { text: `flows / ${bucket} s`, font: { size: 11 } }, range: [0, ymax * 1.18], fixedrange: true }),
+    xaxis: Object.assign(layout().xaxis, { type: "date", autorange: true, hoverformat: "%H:%M:%S", tickformat: act.minutes <= 5 ? "%H:%M:%S" : "%H:%M", nticks: 7, showgrid: false, showspikes: false }),
+    yaxis: Object.assign(layout().yaxis, { title: { text: `flows / ${bucket} s`, font: { size: 11 } }, range: [0, ymax * 1.18], fixedrange: true, showspikes: false }),
   }, null, { scrollZoom: true, doubleClick: "reset", displayModeBar: false });
 }
 async function pageOverview(full) {
@@ -1023,7 +1041,7 @@ async function renderMatrix(full) {
     { h: "Last run", num: 1, f: r => r.last_rate == null ? NA : `${pct(r.last_rate, 1)} <span class="na">${ago(r.last_run)}</span>` },
     { h: "Model", f: r => esc(r.models.join(", ")) },
   ], mx.cells, { emptyTitle: "No labelled runs yet", emptyBody: "Run attacks with “Generate & capture”; each finished run adds its flows here." });
-  $("mxHint").textContent = `Share of each attack pod's flows (DNS excluded) that the model put in the expected class, from this lab's own runs. Live model now: ${mx.model_in_use === "k8s-lab-live" && rt.state !== "done" ? "k8s-lab-live (trained in the sandbox)" : mx.model_in_use}.`;
+  $("mxHint").textContent = `Share of each attack pod's flows (DNS and mixed-in benign requests excluded) that the model put in the expected class, from this lab's own runs. Only flows scored by the live model are counted. Live model now: ${mx.model_in_use === "k8s-lab-live" ? "k8s-lab-live (trained in the sandbox, not on this machine)" : mx.model_in_use === "k8s-lab-local" ? "k8s-lab-local (retrained on this machine)" : mx.model_in_use}.`;
   $("rtBtn").disabled = rt.state === "running";
   $("rtState").textContent = rt.state === "running" ? `retraining… (started ${ago(rt.started_at)})` : rt.state === "done" ? `retrained ${ago(rt.finished_at)}` : rt.state === "failed" ? "retraining failed" : `${fmt(rt.labelled_sessions)} labelled run(s) available`;
   $("rtOut").html = rt.state === "failed" ? errBox(`${rt.error}\n${(rt.log || "").slice(-600)}`) : rt.state === "done" && rt.result ? retrainResult(rt) : "";
@@ -1074,7 +1092,7 @@ async function pageLab(full) {
         { h: "State", f: j => pill(j.state, j.state) },
         { h: "Result", wrap: 1, f: j => j.outcome ? pill(j.outcome.result, j.outcome.result === "verified" ? "ok" : ["failed", "no traffic", "not captured"].includes(j.outcome.result) ? "error" : "idle") + `<div class="hint" style="margin:2px 0 0;white-space:normal;max-width:300px">${esc(j.outcome.detail || "")}${j.outcome.started_at ? ` · ${time(j.outcome.started_at)}–${j.outcome.ended_at ? time(j.outcome.ended_at) : "…"}` : ""}</div>` : "—" },
         { h: "Expected", f: j => j.expect_class ? clsTag(j.expect_class) : "—" },
-        { h: "Flows", num: 1, f: j => fmt(j.breakdown.flows) },
+        { h: "Attack flows", num: 1, f: j => fmt(j.breakdown.flows) + ((j.breakdown.dns_flows || (j.breakdown.benign_mix || {}).flows) ? `<div class="hint" style="margin:2px 0 0;white-space:normal">not counted: ${[j.breakdown.dns_flows ? fmt(j.breakdown.dns_flows) + " DNS" : "", (j.breakdown.benign_mix || {}).flows ? fmt(j.breakdown.benign_mix.flows) + " benign requests (" + fmt((j.breakdown.benign_mix.by_class || {}).BENIGN || 0) + " scored BENIGN)" : ""].filter(Boolean).join(", ")}</div>` : "") },
         { h: "Predicted", wrap: 1, f: j => Object.entries(j.breakdown.by_class || {}).sort((a, b) => b[1] - a[1]).map(([c, n]) => clsTag(c) + " " + fmt(n)).join(" ") || `<span class="hint">${esc(j.breakdown.note || "no flows yet")}</span>` },
         { h: "Detected as expected", num: 1, f: j => j.breakdown.accuracy == null ? "—" : pct(j.breakdown.accuracy, 1) },
         { h: "Behaviour alerts", f: j => Object.entries(j.breakdown.behaviour_alerts || {}).map(([k, n]) => `${esc(k.replace("_", " "))} ${fmt(n)}`).join(", ") || "none" },
@@ -1238,11 +1256,31 @@ $("rpPlay").addEventListener("click", rpPlay);
 $("rpSlider").addEventListener("input", e => { rpStop(); rpShow(+e.target.value); });
 document.addEventListener("click", e => { const b = e.target.closest("[data-replay]"); if (b) openReplay(b.dataset.replay); });
 
+// Live deception follows the captured traffic as it is scored: the diagram is refreshed
+// every 2 s (independent of the page refresh), paths show their current flow rate, and a
+// path with no flows in the last 10 s dims.
+let LIVE_DEC = null;
+async function liveDeception() {
+  try {
+    const g = await api("/api/live/flow-graph?seconds=120&recent=10");
+    flowDiagram("decFlow", g, { live: true, emptyTitle: "No traffic in the last 2 minutes", emptyBody: "Attacker → target → decoy paths appear here while an attack runs." });
+    const active = g.edges.filter(e => e.recent > 0), rate = active.reduce((a, e) => a + (e.rate || 0), 0);
+    $("decLiveRate").html = `<span class="live-dot"></span>live · ${active.length ? `${fmt(rate, rate < 10 ? 1 : 0)} flows/s on ${active.length} path(s)` : "no traffic scored in the last 10 s"} · updated ${new Date(g.at).toLocaleTimeString([], { hour12: false })}`;
+  } catch (_) { }
+}
+function startLiveDeception() {
+  if (LIVE_DEC) return;
+  LIVE_DEC = setInterval(() => {
+    if (S.page !== "deception") { clearInterval(LIVE_DEC); LIVE_DEC = null; return; }
+    if (!S.paused && !document.hidden) liveDeception();
+  }, 2000);
+}
 async function pageDeception() {
   const [st, pol, decoys, dec, inter, lv] = await Promise.all([api("/api/deception/status"), S.policy ? Promise.resolve(S.policy) : api("/api/deception/policy"),
     api("/api/deception/decoys?limit=100"), api("/api/deception/decisions?limit=150"), api("/api/deception/interactions?limit=200"), api("/api/deception/live?limit=20")]);
   renderLive(lv);
-  api("/api/live/flow-graph?seconds=180").then(g => flowDiagram("decFlow", g, { emptyTitle: "No traffic in the last 3 minutes", emptyBody: "Attacker → target → decoy paths appear here while an attack runs." })).catch(() => { });
+  liveDeception();
+  startLiveDeception();
   const ne = await api("/api/deception/not-engaged?minutes=360");
   $("decNot").html = (!st.enabled ? `<div class="errbox" style="border-color:var(--warning);color:var(--warning-ink)">Automatic deception is disabled: new detections are recorded but nothing is engaged. Enable it above.</div>` : "") + table([
     { h: "Seen", f: r => `${time(r.first_seen)} <span class="na">${ago(r.first_seen)}</span><br><span class="na">last ${time(r.last_seen)} · ${fmt(r.decisions)} check(s)</span>` },

@@ -110,6 +110,12 @@ target_apps:
 
 # Traffic lab: each named scenario is one Kubernetes Job (deploy/traffic-lab).
 # "detectable" marks the attacks the CIC model was trained to recognise.
+# Retrain the live model on this machine's own labelled runs automatically after this many
+# new attack Jobs (0 = only with the Retrain button). The new model goes live only if every
+# class's recall holds and one improves on the same held-out flows.
+retrain:
+  auto_after_attack_jobs: 6
+
 traffic_lab:
   namespace: ids-traffic
   targets:
@@ -122,6 +128,9 @@ traffic_lab:
   # source port in benign_src_ports (outside the ephemeral range), so training can label
   # those flows BENIGN and deception can be checked: they must keep reaching the target.
   benign_mix_seconds: 3
+  # Update the generator script in the cluster (kubectl apply -k deploy/traffic-lab) when
+  # it is older than this checkout, at dashboard start and before each run.
+  auto_update_generator: true
   benign_src_ports: [20000, 20999]
   # default_target is a key of `targets`; env is passed to the generator pod.
   # expect_class is what the scenario is meant to resemble, not a promise: the

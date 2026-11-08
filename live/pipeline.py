@@ -131,9 +131,10 @@ def run_scenarios(scenarios: list[str], targets: list[str] | None = None, count:
         except Exception as e:  # noqa: BLE001
             notes.append(f"WARNING: could not bring the target apps up: {str(e)[:200]}")
     try:
-        lab = check_ready(cfg)
-        if lab.get("generator_current") is False:
-            notes.append(f"WARNING: {lab['warning']} (run: {lab['fix']})")
+        from live.trafficlab import ensure_generator_current
+        note = ensure_generator_current(cfg)
+        if note:
+            notes.append(note)
     except Exception:  # noqa: BLE001
         pass
     pairs = []
@@ -318,9 +319,38 @@ def _watch(run_id: str, cfg: dict[str, Any], poll_s: float = 3.0) -> None:
         log.info("auto-stop: capture stopped after run %s", run_id)
         _update_run(run_id, cfg, auto_stop={"state": "stopped", "at": _now(),
                                             "detail": f"capture stopped automatically {drain:g}s after the last Job finished"})
+        _maybe_auto_retrain(run, cfg)
     except Exception as e:  # noqa: BLE001
         log.exception("auto-stop watcher for %s failed", run_id)
         _update_run(run_id, cfg, auto_stop={"state": "error", "detail": str(e)[:200]})
+
+
+ATTACKS = {"port_scan", "brute_force", "web_attack", "slow_dos"}
+
+
+def _maybe_auto_retrain(run: dict[str, Any], cfg: dict[str, Any]) -> None:
+    """After every `retrain.auto_after_attack_jobs` new labelled attack Jobs, retrain on this
+    machine's runs in the background. The new model only goes live if per-class recall
+    improves on the same held-out flows (scripts/train_lab_model.py gate)."""
+    n_after = int((cfg.get("retrain") or {}).get("auto_after_attack_jobs", 6) or 0)
+    if n_after <= 0:
+        return
+    new = sum(1 for j in run.get("jobs", []) if j.get("scenario") in ATTACKS and j.get("pod_ip"))
+    if not new:
+        return
+    with db.connect(db.db_path(cfg)) as conn:
+        count = int(db.kv_get(conn, "retrain_new_attack_jobs", "0") or 0) + new
+        db.kv_set(conn, "retrain_new_attack_jobs", str(count))
+    if count < n_after:
+        return
+    from live import retrain
+    try:
+        retrain.start(cfg, reason=f"automatic: {count} new labelled attack Jobs since the last training")
+        with db.connect(db.db_path(cfg)) as conn:
+            db.kv_set(conn, "retrain_new_attack_jobs", "0")
+        log.info("automatic retraining started after %d new attack Jobs", count)
+    except Exception as e:  # noqa: BLE001 - already running, or no runs: try again after the next run
+        log.info("automatic retraining not started: %s", e)
 
 
 def cancel_auto_stop(cfg: dict[str, Any]) -> None:
@@ -343,11 +373,18 @@ def _breakdown(conn, job: dict[str, Any], since: str, until: str | None) -> dict
     from live.trafficlab import benign_src_ports
     lo, hi = benign_src_ports()
     mixed = "(COALESCE(src_port, 0) BETWEEN ? AND ? OR COALESCE(dst_port, 0) BETWEEN ? AND ?)"
+    dns = "(COALESCE(src_port, 0) = 53 OR COALESCE(dst_port, 0) = 53)"
+    # the attack's own flows: DNS lookups (the generator resolves the service name before
+    # each connection, so there are about as many as attack flows) and the benign requests
+    # mixed into the run are counted apart, not as missed detections
     rows = conn.execute(
         "SELECT predicted_class, COUNT(*) n, SUM(is_malicious) mal, AVG(confidence) conf, "
         "SUM(CASE WHEN allowlisted IS NOT NULL THEN 1 ELSE 0 END) allow FROM detections "
         "WHERE simulated = 0 AND (src_ip = ? OR dst_ip = ?) AND detected_at >= ? AND detected_at <= ? "
-        f"AND NOT {mixed} GROUP BY predicted_class", (ip, ip, since, until, lo, hi, lo, hi)).fetchall()
+        f"AND NOT {mixed} AND NOT {dns} GROUP BY predicted_class", (ip, ip, since, until, lo, hi, lo, hi)).fetchall()
+    dns_n = conn.execute(
+        "SELECT COUNT(*) FROM detections WHERE simulated = 0 AND (src_ip = ? OR dst_ip = ?) AND detected_at >= ? "
+        f"AND detected_at <= ? AND {dns}", (ip, ip, since, until)).fetchone()[0]
     # the benign requests mixed into the attack: they should be scored BENIGN and keep going
     # to the real target (never to the decoy)
     bm = conn.execute(
@@ -363,7 +400,7 @@ def _breakdown(conn, job: dict[str, Any], since: str, until: str | None) -> dict
             "matched": by.get(exp, 0) if exp else None,
             "accuracy": round(by.get(exp, 0) / total, 4) if exp and total else None,
             "mean_confidence": {r["predicted_class"]: round(r["conf"], 3) for r in rows},
-            "behaviour_alerts": {a: n for a, n in alerts},
+            "behaviour_alerts": {a: n for a, n in alerts}, "dns_flows": int(dns_n),
             "benign_mix": {"flows": sum(r["n"] for r in bm),
                            "by_class": dict(Counter(r["predicted_class"] for r in bm for _ in range(r["n"]))),
                            "by_dst": dict(Counter(r["dst_ip"] for r in bm for _ in range(r["n"])))} if bm else None}
@@ -388,7 +425,7 @@ def _outcome(pj: dict[str, Any]) -> dict[str, Any]:
         return {**base, "result": "not captured",
                 "detail": "traffic reached the target but no flow of this pod was scored (capture off, or still processing)"}
     return {**base, "result": "verified" if st == "succeeded" else st,
-            "detail": f"{v.get('ok', 0):,} answered by the target, {flows:,} flows captured and scored"}
+            "detail": f"{v.get('ok', 0):,} answered by the target, {flows:,} attack flows captured and scored"}
 
 
 def run_status(run_id: str | None = None, cfg: dict[str, Any] | None = None) -> dict[str, Any]:

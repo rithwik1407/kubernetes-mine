@@ -116,6 +116,35 @@ def generator_freshness(cm) -> dict[str, Any]:
             "fix": "kubectl apply -k deploy/traffic-lab"}
 
 
+def update_generator(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Apply deploy/traffic-lab (the generator script ConfigMap, the lab namespace and its
+    policies) from this checkout, with the default kubeconfig (the least-privilege
+    ids-controller identity may not change ConfigMaps). A fixed command, no request input."""
+    cfg = cfg or load_config()
+    from live import targetaccess
+    st = targetaccess.settings(cfg)
+    p = targetaccess._kubectl(st, "apply", "-k", str(repo_path("deploy/traffic-lab")), timeout=60)
+    if p.returncode != 0:
+        return {"updated": False, "error": (p.stderr or p.stdout).strip()[:300]}
+    return {"updated": True}
+
+
+def ensure_generator_current(cfg: dict[str, Any] | None = None) -> str | None:
+    """If the cluster runs an older generator script than this checkout, update it.
+    Returns a note for the run (None when it was already current)."""
+    cfg = cfg or load_config()
+    lab = check_ready(cfg)
+    if lab.get("generator_current") is not False:
+        return None
+    if not cfg["traffic_lab"].get("auto_update_generator", True):
+        return f"WARNING: {lab['warning']} (run: {lab['fix']})"
+    res = update_generator(cfg)
+    if res["updated"]:
+        log.info("traffic generator script in the cluster updated from this checkout")
+        return "the generator script in the cluster was older than this checkout: updated it (kubectl apply -k deploy/traffic-lab)"
+    return f"WARNING: {lab['warning']}; updating it failed ({res['error']}); run: {lab['fix']}"
+
+
 # --- targets ---------------------------------------------------------------------------
 def _decoy_targets(core, cfg: dict[str, Any]) -> dict[str, str]:
     """host:port of every managed decoy Service (for the decoy_probe scenario)."""
